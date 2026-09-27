@@ -82,7 +82,7 @@ type ConfigService interface {
 }
 
 type service struct {
-	repo                 Repository
+repo                 Repository
 	configRepo           ConfigRepository
 	rdb                  redis.UniversalClient
 	client               *http.Client
@@ -93,13 +93,16 @@ type service struct {
 	allowPrivateNetworks bool
 }
 
-var DefaultBackoffSchedule = []time.Duration{
-	1 * time.Minute,
-	5 * time.Minute,
-	30 * time.Minute,
-	2 * time.Hour,
-	6 * time.Hour,
-}
+var (
+	DefaultBackoffSchedule = []time.Duration{
+		1 * time.Minute,
+		5 * time.Minute,
+		30 * time.Minute,
+		2 * time.Hour,
+		6 * time.Hour,
+	}
+	ErrInvalidEventType = errors.New("invalid event type")
+)
 
 func NewService(repo Repository, rdb redis.UniversalClient, queueClient *queue.Client, maxPerMinute int, allowPrivateNetworks bool) Service {
 	if maxPerMinute <= 0 {
@@ -144,14 +147,27 @@ func (s *service) RegisterEndpoint(ctx context.Context, url string, events []str
 		return nil, "", err
 	}
 
+	if len(events) == 0 {
+		events = []string{"transfer.initiated", "transfer.settled", "transfer.failed", "wallet.funded", "conversion.completed"}
+	} else {
+		for _, ev := range events {
+			valid := false
+			for _, supported := range domain.SupportedEventTypes {
+				if ev == supported {
+					valid = true
+					break
+				}
+			}
+			if !valid {
+				return nil, "", fmt.Errorf("%w: %s", ErrInvalidEventType, ev)
+			}
+		}
+	}
+
 	tid := tenant.IDFromContext(ctx)
 	var tenantPtr *string
 	if tid != "" {
 		tenantPtr = &tid
-	}
-
-	if len(events) == 0 {
-		events = []string{"transfer.initiated", "transfer.settled", "transfer.failed", "wallet.funded", "conversion.completed"}
 	}
 
 	secret := generateSecret()
@@ -181,7 +197,18 @@ func (s *service) ListEndpoints(ctx context.Context) ([]*domain.WebhookEndpoint,
 	if tid != "" {
 		tenantPtr = &tid
 	}
-	return s.repo.ListEndpoints(ctx, tenantPtr)
+	eps, err := s.repo.ListEndpoints(ctx, tenantPtr)
+	if err != nil {
+		return nil, err
+	}
+	for _, ep := range eps {
+		if ep != nil && ep.Secret == "" {
+			ep.Secret = generateSecret()
+			ep.UpdatedAt = time.Now().UTC()
+			_ = s.repo.UpdateEndpoint(ctx, ep)
+		}
+	}
+	return eps, nil
 }
 
 func (s *service) DeleteEndpoint(ctx context.Context, id string) error {
@@ -267,8 +294,17 @@ func (s *service) ReplayDeadLetter(ctx context.Context, deadLetterID string) err
 	return nil
 }
 
+func (s *service) backfillEndpointSecretIfNeeded(ctx context.Context, ep *domain.WebhookEndpoint) {
+	if ep != nil && ep.Secret == "" {
+		ep.Secret = generateSecret()
+		ep.UpdatedAt = time.Now().UTC()
+		_ = s.repo.UpdateEndpoint(ctx, ep)
+	}
+}
+
 func (s *service) GetEndpointHealth(ctx context.Context, endpointID string) (*domain.WebhookHealth, error) {
 	ep, err := s.repo.GetEndpoint(ctx, endpointID)
+	s.backfillEndpointSecretIfNeeded(ctx, ep)
 	if err != nil {
 		return nil, err
 	}
@@ -368,6 +404,7 @@ func (s *service) Deliver(ctx context.Context, deliveryID string) error {
 	}
 
 	ep, err := s.repo.GetEndpoint(ctx, deliv.EndpointID)
+	s.backfillEndpointSecretIfNeeded(ctx, ep)
 	if err != nil {
 		return err
 	}

@@ -43,7 +43,15 @@ func (h *Handler) ListEndpoints(w http.ResponseWriter, r *http.Request) {
 		api.Error(w, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error())
 		return
 	}
-	api.JSON(w, http.StatusOK, map[string]interface{}{"endpoints": eps})
+	var respEps []domain.WebhookEndpoint
+	for _, ep := range eps {
+		if ep != nil {
+			copyEp := *ep
+			copyEp.Secret = ""
+			respEps = append(respEps, copyEp)
+		}
+	}
+	api.JSON(w, http.StatusOK, map[string]interface{}{"endpoints": respEps})
 }
 
 func (h *Handler) RegisterEndpoint(w http.ResponseWriter, r *http.Request) {
@@ -56,16 +64,29 @@ func (h *Handler) RegisterEndpoint(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ep, _, err := h.svc.RegisterEndpoint(r.Context(), req.URL, req.Events)
+	ep, secret, err := h.svc.RegisterEndpoint(r.Context(), req.URL, req.Events)
 	if err != nil {
-		if errors.Is(err, ErrUnsafeWebhookURL) {
+		if errors.Is(err, ErrUnsafeWebhookURL) || errors.Is(err, ErrInvalidEventType) {
 			api.Error(w, http.StatusBadRequest, "INVALID_REQUEST", err.Error())
 			return
 		}
 		api.Error(w, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error())
 		return
 	}
-	api.JSON(w, http.StatusCreated, ep)
+	api.JSON(w, http.StatusCreated, map[string]interface{}{
+		"id":                ep.ID,
+		"tenant_id":         ep.TenantID,
+		"url":               ep.URL,
+		"secret":            secret,
+		"events":            ep.Events,
+		"active":            ep.Active,
+		"success_count":     ep.SuccessCount,
+		"failure_count":     ep.FailureCount,
+		"last_delivered_at": ep.LastDeliveredAt,
+		"notified_failing":  ep.NotifiedFailing,
+		"created_at":        ep.CreatedAt,
+		"updated_at":        ep.UpdatedAt,
+	})
 }
 
 func (h *Handler) DeleteEndpoint(w http.ResponseWriter, r *http.Request) {
