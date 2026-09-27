@@ -261,6 +261,8 @@ func main() {
 
 	driftThreshold := reconcile.ParseDriftThreshold(cfg.ReconciliationDriftThresholdUSD)
 
+	transferSvc := transfer.NewService(txRepo, walletRepo, feeSvc, qClient, nil).WithStellarClient(stellarClient).WithAuditLogger(txRepo)
+
 	reconcileSvc := reconcile.NewService(
 		txRepo,
 		reconcileRepo,

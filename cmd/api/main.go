@@ -152,7 +152,8 @@ func main() {
 		WithSigner(signer).
 		WithIssuers(cfg.StellarUSDCIssuer, cfg.StellarEURCIssuer)
 	transferSvc := transfer.NewService(txRepo, walletRepo, feeSvc, queueClient, tenantRepo).
-		WithStellarClient(stellarClient)
+		WithStellarClient(stellarClient).
+		WithAuditLogger(txRepo)
 	webhookSvc := webhook.NewService(webhookRepo, redisClient, queueClient, 120, cfg.WebhookAllowPrivateNetworks)
 
 	// Compliance screening sits in front of settlement, so it is wired before

@@ -252,9 +252,8 @@ func (s *service) initiate(ctx context.Context, fromID, toID, asset string, amou
 
 	if s.queue != nil {
 		if err := s.queue.EnqueueTransfer(ctx, tx.ID); err != nil {
-			// Transaction is persisted ΓÇö worker will not run, but it can be retried.
-			// Log this but don't fail the request.
-			_ = err
+			zerolog.Ctx(ctx).Error().Err(err).Str("transaction_id", tx.ID).Msg("transfer: failed to enqueue settlement job")
+			return nil, fmt.Errorf("enqueue settlement: %w", err)
 		}
 	}
 

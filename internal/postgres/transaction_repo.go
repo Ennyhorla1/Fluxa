@@ -710,7 +710,7 @@ func (r *TransactionRepo) CountMonthlyTransfersByTenant(ctx context.Context, ten
 
 	var count int
 	err := r.db.QueryRow(ctx,
-		`SELECT COUNT(*) FROM transactions WHERE tenant_id = $1 AND created_at >= $2 AND created_at < $3`,
+		`SELECT COUNT(*) FROM transactions WHERE tenant_id = $1 AND type = 'transfer' AND created_at >= $2 AND created_at < $3`,
 		tenantID, startDate, endDate,
 	).Scan(&count)
 	if err != nil {
@@ -745,7 +745,7 @@ func (r *TransactionRepo) CreateWithMonthlyLimit(ctx context.Context, tx *domain
 
 	var count int
 	err = dbTx.QueryRow(ctx,
-		`SELECT COUNT(*) FROM transactions WHERE tenant_id = $1 AND created_at >= $2 AND created_at < $3`,
+		`SELECT COUNT(*) FROM transactions WHERE tenant_id = $1 AND type = 'transfer' AND created_at >= $2 AND created_at < $3`,
 		tenantID, startDate, endDate,
 	).Scan(&count)
 	if err != nil {
