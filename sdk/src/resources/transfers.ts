@@ -6,6 +6,7 @@ import {
   ListTransactionsResponse,
   BatchResponse,
 } from '../types';
+import { Page, createPage, paginate, paginateAll } from '../pagination';
 
 export class TransfersResource {
   constructor(private http: HttpClient) {}
@@ -44,6 +45,47 @@ export class TransfersResource {
       signal: options?.signal,
     });
     return res.data;
+  }
+
+  /**
+   * Fetches a single page of transfers formatted as a standard Page<TransferResponse>.
+   */
+  async listPage(
+    query: ListTransactionsQuery,
+    options?: RequestOptions,
+  ): Promise<Page<TransferResponse>> {
+    const res = await this.list(query, options);
+    const nextCursor = res.next_cursor ?? res.cursor ?? null;
+    return createPage(res.transactions ?? [], nextCursor);
+  }
+
+  /**
+   * Returns an async iterator that iterates over individual transfers across pages.
+   * Supports `for await (const transfer of client.transfers.iterate(query))`.
+   */
+  iterate(
+    query: ListTransactionsQuery,
+    options?: RequestOptions,
+  ): AsyncIterableIterator<TransferResponse> {
+    return paginate<TransferResponse, ListTransactionsQuery>({
+      fetchPage: (q, opts) => this.listPage(q, opts),
+      query,
+      options,
+    });
+  }
+
+  /**
+   * Fetches all transfers across all pages into a consolidated array.
+   */
+  async listAll(
+    query: ListTransactionsQuery,
+    options?: RequestOptions,
+  ): Promise<TransferResponse[]> {
+    return paginateAll<TransferResponse, ListTransactionsQuery>({
+      fetchPage: (q, opts) => this.listPage(q, opts),
+      query,
+      options,
+    });
   }
 
   async createBatch(

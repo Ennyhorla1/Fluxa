@@ -56,6 +56,19 @@ export class ConflictError extends FluxaError {
   }
 }
 
+export class RepeatedCursorError extends FluxaError {
+  readonly cursor: string;
+
+  constructor(cursor: string) {
+    super(0, {
+      code: 'REPEATED_CURSOR',
+      message: `Repeated cursor detected: "${cursor}". Halting pagination to prevent an infinite loop.`,
+    });
+    this.name = 'RepeatedCursorError';
+    this.cursor = cursor;
+  }
+}
+
 export function classifyError(status: number, body: unknown): FluxaError {
   // The API wraps errors as { "error": { "code": "...", "message": "..." } }
   // with an optional top-level "validation_errors" array for 400s.

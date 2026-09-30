@@ -79,11 +79,32 @@ const tx = await client.transfers.create({
 // Get by ID
 const found = await client.transfers.get("tx-id");
 
-// List transactions for a wallet
+// List transactions for a wallet (backward-compatible raw response)
 const { transactions } = await client.transfers.list({
   wallet_id: "wallet-id",
   limit: 25,
   offset: 0,
+});
+
+// Single page with standardized Page<T> container
+const page = await client.transfers.listPage({
+  wallet_id: "wallet-id",
+  limit: 25,
+});
+console.log(page.items, page.nextCursor, page.hasNextPage);
+
+// Stream items across all pages using async iteration
+for await (const transfer of client.transfers.iterate({
+  wallet_id: "wallet-id",
+  limit: 50,
+})) {
+  console.log(transfer.id, transfer.amount);
+  if (transfer.status === "completed") break; // Breaking halts further HTTP requests
+}
+
+// Fetch all pages into a consolidated array
+const allTransfers = await client.transfers.listAll({
+  wallet_id: "wallet-id",
 });
 
 // Batch transfers
@@ -242,6 +263,40 @@ const withdrawal = await client.fiat.withdraw("wallet-id", {
 });
 ```
 
+## Cursor Pagination & Streaming
+
+Fluxa provides reusable cursor-pagination primitives and async iterators to simplify traversing large collections without manual cursor tracking.
+
+### Streaming with Async Iterators
+Traverse items seamlessly using `for await...of`. Breaking out of the loop lazily halts any subsequent HTTP page requests:
+
+```ts
+for await (const transfer of client.transfers.iterate({ wallet_id: "wallet-id" })) {
+  console.log(transfer.id, transfer.amount);
+  if (transfer.status === "failed") {
+    break; // Stops further page requests
+  }
+}
+```
+
+### Cancellation with AbortSignal
+Pass an `AbortSignal` in options to cancel an active page request and abort the stream:
+
+```ts
+const controller = new AbortController();
+setTimeout(() => controller.abort(), 10000);
+
+for await (const transfer of client.transfers.iterate(
+  { wallet_id: "wallet-id" },
+  { signal: controller.signal }
+)) {
+  console.log(transfer);
+}
+```
+
+### Safety against Infinite Loops
+If a malformed server response sends the same cursor token repeatedly, the SDK detects the loop and halts by throwing a typed `RepeatedCursorError`.
+
 ## Error Handling
 
 ```ts
@@ -251,6 +306,7 @@ import {
   NotFoundError,
   ValidationError,
   RateLimitError,
+  RepeatedCursorError,
 } from "@savitura/fluxa";
 
 try {
@@ -260,6 +316,8 @@ try {
     console.log("Transfer not found:", err.message);
   } else if (err instanceof RateLimitError) {
     console.log("Rate limited, retry after:", err.retryAfter);
+  } else if (err instanceof RepeatedCursorError) {
+    console.log("Malformed cursor loop detected:", err.cursor);
   } else if (err instanceof AuthenticationError) {
     console.log("Bad API key");
   } else if (err instanceof FluxaError) {
