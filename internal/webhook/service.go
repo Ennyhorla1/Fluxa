@@ -185,6 +185,11 @@ func generateSecret() (string, error) {
 }
 
 func (s *service) RegisterEndpoint(ctx context.Context, url string, events []string) (*domain.WebhookEndpoint, string, error) {
+	for _, eventType := range events {
+		if eventType != "*" && !domain.IsSupportedEventType(eventType) {
+			return nil, "", fmt.Errorf("%w: %q", ErrUnsupportedEventType, eventType)
+		}
+	}
 	if err := s.validateWebhookURL(ctx, url); err != nil {
 		return nil, "", err
 	}
@@ -196,7 +201,7 @@ func (s *service) RegisterEndpoint(ctx context.Context, url string, events []str
 	}
 
 	if len(events) == 0 {
-		events = []string{"transfer.initiated", "transfer.settled", "transfer.failed", "wallet.funded", "conversion.completed"}
+		events = append([]string(nil), domain.SupportedEventTypes...)
 	}
 
 	secret, err := generateSecret()
@@ -256,6 +261,9 @@ func (s *service) DeleteEndpoint(ctx context.Context, id string) error {
 }
 
 func (s *service) CreateSubscription(ctx context.Context, eventType, webhookURL string) (*domain.WebhookSubscription, error) {
+	if !domain.IsSupportedEventType(eventType) {
+		return nil, fmt.Errorf("%w: %q", ErrUnsupportedEventType, eventType)
+	}
 	if err := s.validateWebhookURL(ctx, webhookURL); err != nil {
 		return nil, err
 	}
@@ -845,6 +853,11 @@ func (s *service) UpdateConfig(ctx context.Context, update domain.WebhookConfigU
 		config.URL = *update.URL
 	}
 	if update.Events != nil {
+		for _, eventType := range *update.Events {
+			if !domain.IsSupportedEventType(eventType) {
+				return nil, fmt.Errorf("%w: %q", ErrUnsupportedEventType, eventType)
+			}
+		}
 		config.Events = append([]string{}, *update.Events...)
 	}
 	if update.Enabled != nil {

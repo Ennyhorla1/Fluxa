@@ -91,13 +91,8 @@ func (h *Handler) TriggerTestEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	allowed := map[string]bool{
-		"transfer.settled": true,
-		"transfer.failed":  true,
-		"wallet.funded":    true,
-	}
-	if !allowed[req.Event] {
-		api.BadRequest(w, "event must be transfer.settled, transfer.failed, or wallet.funded")
+	if !domain.IsSupportedEventType(req.Event) {
+		api.BadRequest(w, "unsupported event type")
 		return
 	}
 
@@ -134,7 +129,7 @@ func (h *Handler) RegisterEndpoint(w http.ResponseWriter, r *http.Request) {
 
 	ep, _, err := h.svc.RegisterEndpoint(r.Context(), req.URL, req.Events)
 	if err != nil {
-		if errors.Is(err, ErrUnsafeWebhookURL) {
+		if errors.Is(err, ErrUnsafeWebhookURL) || errors.Is(err, ErrUnsupportedEventType) {
 			api.Error(w, http.StatusBadRequest, "INVALID_REQUEST", err.Error())
 			return
 		}
@@ -290,7 +285,7 @@ func (h *Handler) CreateSubscription(w http.ResponseWriter, r *http.Request) {
 
 	sub, err := h.svc.CreateSubscription(r.Context(), req.EventType, req.WebhookURL)
 	if err != nil {
-		if errors.Is(err, ErrUnsafeWebhookURL) {
+		if errors.Is(err, ErrUnsafeWebhookURL) || errors.Is(err, ErrUnsupportedEventType) {
 			api.Error(w, http.StatusBadRequest, "INVALID_REQUEST", err.Error())
 			return
 		}
@@ -369,7 +364,7 @@ func (h *Handler) UpdateConfig(w http.ResponseWriter, r *http.Request) {
 			api.Error(w, http.StatusNotFound, "NOT_FOUND", "webhook config unavailable")
 			return
 		}
-		if errors.Is(err, ErrUnsafeWebhookURL) {
+		if errors.Is(err, ErrUnsafeWebhookURL) || errors.Is(err, ErrUnsupportedEventType) {
 			api.Error(w, http.StatusBadRequest, "INVALID_REQUEST", err.Error())
 			return
 		}

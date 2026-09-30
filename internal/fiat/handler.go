@@ -46,16 +46,6 @@ func (h *Handler) WithdrawRoutes() func(r chi.Router) {
 	}
 }
 
-func (h *Handler) WithdrawalRoutes() func(r chi.Router) {
-	return func(r chi.Router) {
-		post := r.Post
-		if h.idem != nil {
-			post = r.With(h.idem).Post
-		}
-		post("/", h.handleWithdrawal)
-	}
-}
-
 func (h *Handler) WebhookRoutes() func(r chi.Router) {
 	return func(r chi.Router) {
 		r.Post("/{provider}", h.handleWebhook)
