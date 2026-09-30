@@ -328,6 +328,16 @@ See [sdk/README.md](sdk/README.md) for full documentation.
 
 `GET /status` combines active incident severity with the latest dependency checks. A stale or missing check reports as `unknown` and degrades the aggregate status. `GET /status/dependencies/history` returns sanitized observations newest first; optional `dependency`, RFC3339 `since`, and `limit` (1-500, default 100) parameters filter results. The API samples PostgreSQL, read replica, Redis, Horizon, and worker heartbeat at startup and every minute, and retains history for 30 days. Probe error messages and response bodies are not persisted or returned.
 
+### Tenant data export
+
+Owners and administrators can download a tenant-scoped JSON snapshot with
+`GET /v1/data-export`. The response includes wallets, transactions, balances,
+API-key metadata, batches, schedules, beneficiaries, webhook subscriptions and
+endpoint metadata, delivery metadata, and audit events.
+Wallet secrets, webhook secrets, and webhook delivery bodies are excluded.
+The export response is marked `Cache-Control: no-store`; treat the downloaded
+file as sensitive account data.
+
 ## License
 
 [MIT](LICENSE)

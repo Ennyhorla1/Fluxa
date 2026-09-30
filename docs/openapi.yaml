@@ -51,6 +51,8 @@ tags:
   description: Claimable balance lookup and claiming
 - name: Audit
   description: Append-only tenant audit events and export
+- name: Data
+  description: Tenant compliance exports
 - name: Idempotency
   description: Inspection and recovery of idempotent operations
 security:
@@ -1561,6 +1563,43 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+  /v1/data-export:
+    get:
+      operationId: exportTenantData
+      summary: Export tenant data
+      description: Downloads a tenant-scoped JSON snapshot of supported account data. Credential secrets and webhook delivery bodies are excluded. Owner or admin role required.
+      tags:
+      - Data
+      responses:
+        '200':
+          description: Tenant data archive as JSON
+          headers:
+            Content-Disposition:
+              schema:
+                type: string
+            Cache-Control:
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [tenant_id, generated_at, data]
+                properties:
+                  tenant_id:
+                    type: string
+                    format: uuid
+                  generated_at:
+                    type: string
+                    format: date-time
+                  data:
+                    type: object
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '500':
           $ref: '#/components/responses/InternalServerError'
   /v1/webhooks:

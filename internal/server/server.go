@@ -28,6 +28,7 @@ import (
 	"github.com/fluxa/fluxa/internal/server/idempotency"
 	"github.com/fluxa/fluxa/internal/status"
 	"github.com/fluxa/fluxa/internal/transfer"
+	"github.com/fluxa/fluxa/internal/tenantdata"
 	"github.com/fluxa/fluxa/internal/treasury"
 	"github.com/fluxa/fluxa/internal/wallet"
 	"github.com/fluxa/fluxa/internal/webhook"
@@ -76,6 +77,7 @@ func New(
 	var beneficiaryHandler *beneficiary.Handler
 	var paymentLinkHandler *paymentlink.Handler
 	var refundHandler *refund.Handler
+	var tenantDataHandler *tenantdata.Handler
 	for _, option := range options {
 		switch value := option.(type) {
 		case AuthRateLimitConfig:
@@ -86,6 +88,8 @@ func New(
 			paymentLinkHandler = value
 		case *refund.Handler:
 			refundHandler = value
+		case *tenantdata.Handler:
+			tenantDataHandler = value
 		}
 	}
 	authLimiter := NewAuthRateLimiter(rateCfg)
@@ -163,6 +167,9 @@ func New(
 			}
 
 			// Org Member Management (Owner & Admin for invite, role update, remove)
+			if tenantDataHandler != nil {
+				r.With(RequireRole(domain.RoleOwner, domain.RoleAdmin)).Get("/data-export", tenantDataHandler.Export)
+			}
 			r.Route("/org", func(r chi.Router) {
 				r.With(RequireRole(domain.RoleOwner, domain.RoleAdmin)).Post("/members/invite", orgHandler.InviteMember)
 				r.Get("/members", orgHandler.ListMembers)

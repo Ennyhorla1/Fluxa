@@ -41,6 +41,7 @@ import (
 	"github.com/fluxa/fluxa/internal/stellar"
 	"github.com/fluxa/fluxa/internal/tracing"
 	"github.com/fluxa/fluxa/internal/transfer"
+	"github.com/fluxa/fluxa/internal/tenantdata"
 	"github.com/fluxa/fluxa/internal/treasury"
 	"github.com/fluxa/fluxa/internal/wallet"
 	"github.com/fluxa/fluxa/internal/webhook"
@@ -428,6 +429,7 @@ func main() {
 		beneficiaryHandler,
 		paymentLinkHandler,
 		refundHandler,
+		tenantdata.NewHandler(tenantdata.NewService(repoDB)).WithAuditLogger(auditSvc),
 	)
 	server.RegisterDocsRoutes(srv.Router())
 
