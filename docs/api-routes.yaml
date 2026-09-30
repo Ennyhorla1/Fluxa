@@ -26,6 +26,8 @@ routes:
   - GET /v1/admin/compliance/sanctions-status
   - GET /v1/admin/fees/collected
   - GET /v1/admin/reconciliation/summary
+  - GET /v1/admin/reconciliation/discrepancies
+  - GET /v1/admin/reconciliation/discrepancies/summary
   - GET /v1/audit
   - GET /v1/audit/export
   - GET /v1/beneficiaries
@@ -57,6 +59,7 @@ routes:
   - "POST /v1/admin/compliance/reviews/{id}/approve"
   - "POST /v1/admin/compliance/reviews/{id}/reject"
   - POST /v1/admin/reconciliation/run
+  - "PATCH /v1/admin/reconciliation/discrepancies/{id}"
   - "POST /v1/admin/transfers/{transferID}/force-settle"
   - POST /v1/auth/login
   - POST /v1/auth/register

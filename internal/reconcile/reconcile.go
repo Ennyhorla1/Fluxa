@@ -94,6 +94,12 @@ type DriftRepository interface {
 	ListCurrentDrift(ctx context.Context) ([]*DriftSnapshot, error)
 }
 
+type DiscrepancyWorkflowRepository interface {
+	ListReconciliationDiscrepancies(context.Context, string, string, string, int, int) ([]*domain.ReconciliationDiscrepancy, int, error)
+	UpdateReconciliationDiscrepancy(context.Context, string, string, string, string, string) (*domain.ReconciliationDiscrepancy, error)
+	ReconciliationDiscrepancySummary(context.Context, string) (*domain.ReconciliationDiscrepancySummary, error)
+}
+
 type taskQueue interface {
 	EnqueueTransfer(context.Context, string) error
 	Enqueue(context.Context, string, interface{}) error
@@ -168,6 +174,44 @@ func NewService(
 func (s *Service) WithDriftThreshold(threshold decimal.Decimal) *Service {
 	s.driftThreshold = threshold
 	return s
+}
+
+func (s *Service) discrepancyWorkflow() (DiscrepancyWorkflowRepository, error) {
+	repo, ok := s.repo.(DiscrepancyWorkflowRepository)
+	if !ok {
+		return nil, errors.New("reconciliation discrepancy workflow is unavailable")
+	}
+	return repo, nil
+}
+
+func (s *Service) ListDiscrepancies(ctx context.Context, tenantID, status, category string, limit, offset int) ([]*domain.ReconciliationDiscrepancy, int, error) {
+	repo, err := s.discrepancyWorkflow()
+	if err != nil {
+		return nil, 0, err
+	}
+	if limit < 1 || limit > 100 {
+		limit = 50
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	return repo.ListReconciliationDiscrepancies(ctx, tenantID, status, category, limit, offset)
+}
+
+func (s *Service) UpdateDiscrepancy(ctx context.Context, tenantID, id, action, note, assignedTo string) (*domain.ReconciliationDiscrepancy, error) {
+	repo, err := s.discrepancyWorkflow()
+	if err != nil {
+		return nil, err
+	}
+	return repo.UpdateReconciliationDiscrepancy(ctx, tenantID, id, action, note, assignedTo)
+}
+
+func (s *Service) DiscrepancySummary(ctx context.Context, tenantID string) (*domain.ReconciliationDiscrepancySummary, error) {
+	repo, err := s.discrepancyWorkflow()
+	if err != nil {
+		return nil, err
+	}
+	return repo.ReconciliationDiscrepancySummary(ctx, tenantID)
 }
 
 // DefaultDriftThresholdUSD is used when RECONCILIATION_DRIFT_THRESHOLD_USD is
