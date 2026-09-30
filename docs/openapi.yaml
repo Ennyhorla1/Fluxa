@@ -1563,6 +1563,66 @@ paths:
                 $ref: '#/components/schemas/ErrorResponse'
         '500':
           $ref: '#/components/responses/InternalServerError'
+  /v1/webhooks/secret:
+    get:
+      operationId: listWebhookSigningSecrets
+      summary: Inspect webhook signing secret versions
+      description: Returns version metadata only. Secret material is never returned by this endpoint.
+      tags:
+      - Webhooks
+      responses:
+        '200':
+          description: Signing-secret metadata for the authenticated tenant
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WebhookSigningSecretsResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+  /v1/webhooks/secret/rotate:
+    post:
+      operationId: rotateWebhookSigningSecret
+      summary: Rotate the tenant webhook signing secret
+      description: Generates a new secret and returns its plaintext once. A bounded overlap lets in-flight deliveries signed with the prior version remain verifiable.
+      tags:
+      - Webhooks
+      parameters:
+      - name: Idempotency-Key
+        in: header
+        required: true
+        schema:
+          type: string
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RotateWebhookSigningSecretRequest'
+      responses:
+        '200':
+          description: New signing secret, disclosed once for this idempotent operation
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RotateWebhookSigningSecretResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          description: Another request with the same idempotency key is still processing.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
   /v1/webhooks:
     post:
       operationId: registerWebhook
@@ -3616,6 +3676,57 @@ components:
         created_at:
           type: string
           format: date-time
+    WebhookSigningSecretMetadata:
+      type: object
+      required:
+      - key_id
+      - created_at
+      - activated_at
+      - status
+      properties:
+        key_id:
+          type: string
+          format: uuid
+        created_at:
+          type: string
+          format: date-time
+        activated_at:
+          type: string
+          format: date-time
+        retired_at:
+          type: string
+          format: date-time
+          nullable: true
+        status:
+          type: string
+          enum: [active, overlapping, retired]
+    WebhookSigningSecretsResponse:
+      type: object
+      required: [secrets]
+      properties:
+        secrets:
+          type: array
+          items:
+            $ref: '#/components/schemas/WebhookSigningSecretMetadata'
+    RotateWebhookSigningSecretRequest:
+      type: object
+      properties:
+        overlap_window_seconds:
+          type: integer
+          minimum: 0
+          maximum: 86400
+          default: 300
+    RotateWebhookSigningSecretResponse:
+      allOf:
+      - $ref: '#/components/schemas/WebhookSigningSecretMetadata'
+      - type: object
+        required: [secret]
+        properties:
+          secret:
+            type: string
+            description: Plaintext signing secret; disclosed only by this rotation response.
+          overlap_window_seconds:
+            type: integer
     RegisterWebhookRequest:
       type: object
       required:

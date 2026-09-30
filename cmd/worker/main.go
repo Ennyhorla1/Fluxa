@@ -166,7 +166,10 @@ func main() {
 		}
 	}()
 
-	webhookSvc := webhook.NewConfigService(webhookRepo, webhookRepo, qClient)
+	webhookSvc := webhook.NewConfigService(webhookRepo, webhookRepo, qClient, cfg.MasterEncryptionKey)
+	if err := webhookSvc.(webhook.ConfigService).MigrateLegacySigningSecrets(ctx); err != nil {
+		log.Fatal().Err(err).Msg("migrate tenant webhook signing secrets")
+	}
 	webhookWorker := webhook.NewWorker(webhookSvc)
 	go func() {
 		ticker := time.NewTicker(24 * time.Hour)

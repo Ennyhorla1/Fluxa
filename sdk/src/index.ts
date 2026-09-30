@@ -63,6 +63,11 @@ export type {
   ListWebhooksResponse,
   WebhookDeliveryResponse,
   ListDeliveriesResponse,
+  WebhookSigningSecretStatus,
+  WebhookSigningSecretMetadata,
+  ListWebhookSigningSecretsResponse,
+  RotateWebhookSigningSecretRequest,
+  RotateWebhookSigningSecretResponse,
   // Schedule
   ScheduleFrequency,
   ScheduleStatus,

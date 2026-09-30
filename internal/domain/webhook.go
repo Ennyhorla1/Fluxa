@@ -127,6 +127,7 @@ type TenantWebhookConfig struct {
 	Enabled          bool
 	URL              string
 	Secret           string
+	SigningKeyID     string
 	SigningAlgorithm string
 	Events           []string
 	Paused           bool
@@ -152,6 +153,7 @@ const (
 type TenantWebhookDelivery struct {
 	ID           string         `json:"id"`
 	TenantID     string         `json:"tenant_id"`
+	SigningKeyID string         `json:"signing_key_id,omitempty"`
 	EventType    EventType      `json:"event_type"`
 	Payload      []byte         `json:"payload"`
 	Status       DeliveryStatus `json:"status"`
@@ -160,6 +162,14 @@ type TenantWebhookDelivery struct {
 	LastAttempt  *time.Time     `json:"last_attempt,omitempty"`
 	CreatedAt    time.Time      `json:"created_at"`
 	UpdatedAt    time.Time      `json:"updated_at"`
+}
+
+type WebhookSigningSecret struct {
+	KeyID       string     `json:"key_id"`
+	CreatedAt   time.Time  `json:"created_at"`
+	ActivatedAt time.Time  `json:"activated_at"`
+	RetiredAt   *time.Time `json:"retired_at,omitempty"`
+	Status      string     `json:"status"`
 }
 
 // WebhookConfigUpdate is a partial update: every field is a pointer so callers

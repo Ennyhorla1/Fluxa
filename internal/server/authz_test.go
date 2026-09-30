@@ -338,3 +338,16 @@ func TestRoleMismatchUsesDBRole(t *testing.T) {
 		t.Fatalf("role mismatch (JWT=owner, DB=viewer): expected 403, got %d", code)
 	}
 }
+
+func TestWebhookSigningSecretRotationRequiresOwnerOrAdmin(t *testing.T) {
+	for _, role := range []string{domain.RoleViewer, domain.RoleDeveloper} {
+		validator := newMockMembershipValidator(
+			&domain.OrgMember{TenantID: "tenant-1", UserID: "user-1", Role: role},
+		)
+		srv := newAuthzTestServerWithValidator(t, validator)
+		code := doRequest(t, srv, http.MethodPost, "/v1/webhooks/secret/rotate", role)
+		if code != http.StatusForbidden {
+			t.Fatalf("role %q on webhook secret rotation: expected 403, got %d", role, code)
+		}
+	}
+}
