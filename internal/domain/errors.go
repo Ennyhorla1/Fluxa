@@ -68,6 +68,7 @@ var (
 	ErrSponsorNotCustodied        = errors.New("sponsor account is not a wallet custodied by Fluxa")
 	ErrInvalidAmount              = errors.New("amount must be a positive number")
 	ErrBeneficiaryNotAllowed      = errors.New("destination is not an active beneficiary")
+	ErrBeneficiaryAccountNotFound = errors.New("destination Stellar account does not exist")
 )
 
 // Organization membership. Kept in its own block: appending to the var block
