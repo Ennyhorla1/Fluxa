@@ -1123,6 +1123,8 @@ paths:
                 error:
                   code: QUOTE_EXPIRED
                   message: quote expired
+                  status: 422
+                  request_id: req-example
         '500':
           $ref: '#/components/responses/InternalServerError'
   /v1/fx/rates:
@@ -2382,6 +2384,8 @@ paths:
                 error:
                   code: REVIEW_ALREADY_DECIDED
                   message: compliance review has already been decided
+                  status: 409
+                  request_id: req-example
         '500':
           $ref: '#/components/responses/InternalServerError'
   /v1/admin/compliance/reviews/{id}/reject:
@@ -2436,6 +2440,8 @@ paths:
                 error:
                   code: REVIEW_ALREADY_DECIDED
                   message: compliance review has already been decided
+                  status: 409
+                  request_id: req-example
         '500':
           $ref: '#/components/responses/InternalServerError'
   /v1/admin/compliance/sanctions-status:
@@ -2559,6 +2565,8 @@ components:
             error:
               code: BAD_REQUEST
               message: invalid request body
+              status: 400
+              request_id: req-example
     Unauthorized:
       description: Unauthorized — missing or invalid API key
       content:
@@ -2569,6 +2577,8 @@ components:
             error:
               code: UNAUTHORIZED
               message: missing or invalid authorization header
+              status: 401
+              request_id: req-example
     NotFound:
       description: Resource not found
       content:
@@ -2579,6 +2589,8 @@ components:
             error:
               code: NOT_FOUND
               message: resource not found
+              status: 404
+              request_id: req-example
     Forbidden:
       description: Forbidden — admin access required
       content:
@@ -2589,6 +2601,8 @@ components:
             error:
               code: FORBIDDEN
               message: admin access required
+              status: 403
+              request_id: req-example
     Conflict:
       description: Conflict — a request with this Idempotency-Key is still in flight
       content:
@@ -2599,6 +2613,8 @@ components:
             error:
               code: REQUEST_IN_PROGRESS
               message: a request with this Idempotency-Key is still in progress
+              status: 409
+              request_id: req-example
     UnprocessableEntity:
       description: Unprocessable — the Idempotency-Key was reused with a different body
       content:
@@ -2609,6 +2625,8 @@ components:
             error:
               code: IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_BODY
               message: this Idempotency-Key was already used with a different request body
+              status: 409
+              request_id: req-example
     InternalServerError:
       description: Internal server error
       content:
@@ -2619,6 +2637,8 @@ components:
             error:
               code: INTERNAL_ERROR
               message: an unexpected error occurred
+              status: 500
+              request_id: req-example
   schemas:
     Beneficiary:
       type: object
@@ -2750,25 +2770,71 @@ components:
           required:
           - code
           - message
+          - status
+          - request_id
           properties:
             code:
               type: string
               enum:
               - BAD_REQUEST
+              - ANCHOR_DEPOSIT_FAILED
+              - ANCHOR_REGISTRATION_FAILED
+              - ANCHOR_TRANSACTION_NOT_FOUND
+              - ANCHOR_WITHDRAWAL_FAILED
+              - API_KEY_NOT_FOUND
+              - API_KEY_REVOKED
+              - API_KEY_EXPIRED
+              - BENEFICIARY_EXISTS
+              - BENEFICIARY_NOT_ACTIVE
+              - BENEFICIARY_NOT_ALLOWED
+              - CONFIG_NOT_FOUND
+              - CONFLICT
+              - COOLING_OFF
+              - CROSS_MODE_KEY_OPERATION
+              - ENVIRONMENT_REQUIRED
+              - IDEMPOTENCY_KEY_REQUIRED
+              - IDEMPOTENCY_RECORD_PERSISTENCE_FAILED
+              - IDEMPOTENCY_RESPONSE_TOO_LARGE
+              - INSUFFICIENT_SCOPE
+              - INVALID_ENVIRONMENT_MODE
+              - INVALID_PREDICATE
+              - INVALID_REQUEST
+              - LAST_ORG_OWNER
+              - METHOD_NOT_ALLOWED
+              - MISSING_TRUSTLINE
+              - NOT_IMPLEMENTED
+              - PAYMENT_LINK_UNAVAILABLE
+              - PREDICATE_NOT_SATISFIABLE
+              - RATE_LIMITED
+              - REFUND_CONFLICT
+              - TEST_MODE_REQUIRED
+              - TRANSFER_ID_INVALID
+              - TRANSFER_ID_REQUIRED
+              - TRANSFER_NOT_CANCELLABLE
+              - UNSUPPORTED_FIAT_CURRENCY
+              - WALLET_ID_REQUIRED
               - NOT_FOUND
               - UNAUTHORIZED
               - FORBIDDEN
               - INTERNAL_ERROR
+              - INSUFFICIENT_SWEEPABLE_BALANCE
               - QUOTE_EXPIRED
               - QUOTE_ALREADY_USED
               - REVIEW_ALREADY_DECIDED
               - CLAIMABLE_BALANCE_NOT_PENDING
               - REQUEST_IN_PROGRESS
-              - IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_BODY
               description: Machine-readable error code
             message:
               type: string
               description: Human-readable error message
+            status:
+              type: integer
+              description: HTTP status code; matches the response status
+              minimum: 400
+              maximum: 599
+            request_id:
+              type: string
+              description: Effective X-Request-ID response header value
     HealthResponse:
       type: object
       properties:

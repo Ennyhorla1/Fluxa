@@ -88,7 +88,7 @@ func (h *Handler) TriggerTestEvent(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) ListEndpoints(w http.ResponseWriter, r *http.Request) {
 	eps, err := h.svc.ListEndpoints(r.Context())
 	if err != nil {
-		api.Error(w, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error())
+		api.InternalError(w, err)
 		return
 	}
 	api.JSON(w, http.StatusOK, map[string]interface{}{"endpoints": eps})
@@ -110,7 +110,7 @@ func (h *Handler) RegisterEndpoint(w http.ResponseWriter, r *http.Request) {
 			api.Error(w, http.StatusBadRequest, "INVALID_REQUEST", err.Error())
 			return
 		}
-		api.Error(w, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error())
+		api.InternalError(w, err)
 		return
 	}
 	api.JSON(w, http.StatusCreated, ep)
@@ -119,7 +119,7 @@ func (h *Handler) RegisterEndpoint(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) DeleteEndpoint(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	if err := h.svc.DeleteEndpoint(r.Context(), id); err != nil {
-		api.Error(w, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error())
+		api.InternalError(w, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -136,7 +136,7 @@ func (h *Handler) ListDeliveries(w http.ResponseWriter, r *http.Request) {
 	}
 	deliveries, err := h.svc.ListDeliveries(r.Context(), id, limit)
 	if err != nil {
-		api.Error(w, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error())
+		api.InternalError(w, err)
 		return
 	}
 	api.JSON(w, http.StatusOK, map[string]interface{}{"deliveries": deliveries})
@@ -168,7 +168,7 @@ func (h *Handler) VerifySignature(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) ListSubscriptions(w http.ResponseWriter, r *http.Request) {
 	subs, err := h.svc.ListSubscriptions(r.Context())
 	if err != nil {
-		api.Error(w, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error())
+		api.InternalError(w, err)
 		return
 	}
 	api.JSON(w, http.StatusOK, map[string]interface{}{"subscriptions": subs})
@@ -190,7 +190,7 @@ func (h *Handler) CreateSubscription(w http.ResponseWriter, r *http.Request) {
 			api.Error(w, http.StatusBadRequest, "INVALID_REQUEST", err.Error())
 			return
 		}
-		api.Error(w, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error())
+		api.InternalError(w, err)
 		return
 	}
 	api.JSON(w, http.StatusCreated, sub)
@@ -199,7 +199,7 @@ func (h *Handler) CreateSubscription(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) DeleteSubscription(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	if err := h.svc.DeleteSubscription(r.Context(), id); err != nil {
-		api.Error(w, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error())
+		api.InternalError(w, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -222,7 +222,7 @@ func (h *Handler) GetConfig(w http.ResponseWriter, r *http.Request) {
 			api.Error(w, http.StatusNotFound, "CONFIG_NOT_FOUND", "webhook config not found")
 			return
 		}
-		api.Error(w, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error())
+		api.InternalError(w, err)
 		return
 	}
 
@@ -269,7 +269,7 @@ func (h *Handler) UpdateConfig(w http.ResponseWriter, r *http.Request) {
 			api.Error(w, http.StatusBadRequest, "INVALID_REQUEST", err.Error())
 			return
 		}
-		api.Error(w, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error())
+		api.InternalError(w, err)
 		return
 	}
 
@@ -317,7 +317,7 @@ func (h *Handler) ListConfigDeliveries(w http.ResponseWriter, r *http.Request) {
 			api.Error(w, http.StatusNotFound, "NOT_FOUND", "webhook config unavailable")
 			return
 		}
-		api.Error(w, http.StatusInternalServerError, "INTERNAL_ERROR", err.Error())
+		api.InternalError(w, err)
 		return
 	}
 	api.JSON(w, http.StatusOK, map[string]interface{}{"deliveries": deliveries})
@@ -335,7 +335,7 @@ func (h *Handler) TestConfigDelivery(w http.ResponseWriter, r *http.Request) {
 			api.Error(w, http.StatusNotFound, "NOT_FOUND", "webhook config unavailable")
 			return
 		}
-		api.Error(w, http.StatusBadRequest, "INVALID_REQUEST", err.Error())
+		api.InternalError(w, err)
 		return
 	}
 	api.JSON(w, http.StatusOK, delivery)

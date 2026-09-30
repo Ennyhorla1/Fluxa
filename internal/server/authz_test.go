@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -262,6 +263,104 @@ func TestRemovedMemberReturns403(t *testing.T) {
 	code := doRequest(t, srv, http.MethodGet, "/v1/fx/rates", domain.RoleAdmin)
 	if code != http.StatusForbidden {
 		t.Fatalf("removed member: expected 403, got %d", code)
+	}
+}
+
+func TestV1MiddlewareErrorIncludesRequestID(t *testing.T) {
+	srv := newAuthzTestServerWithValidator(t, nil)
+	req := httptest.NewRequest(http.MethodGet, "/v1/keys/", nil)
+	req.Header.Set("X-Request-ID", "req-middleware-test")
+	rec := httptest.NewRecorder()
+	srv.router.ServeHTTP(rec, req)
+
+	var body struct {
+		Error struct {
+			Code      string `json:"code"`
+			Message   string `json:"message"`
+			Status    int    `json:"status"`
+			RequestID string `json:"request_id"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode middleware error: %v", err)
+	}
+	if rec.Code != http.StatusUnauthorized || body.Error.Status != rec.Code {
+		t.Fatalf("status mismatch: HTTP %d, body %d", rec.Code, body.Error.Status)
+	}
+	if body.Error.Code != "UNAUTHORIZED" || body.Error.RequestID != "req-middleware-test" {
+		t.Fatalf("unexpected middleware error: %+v", body.Error)
+	}
+	if rec.Header().Get("X-Request-ID") != body.Error.RequestID {
+		t.Fatalf("request ID header mismatch: %q", rec.Header().Get("X-Request-ID"))
+	}
+}
+
+func TestV1RoleMiddlewareErrorIncludesRequestID(t *testing.T) {
+	validator := newMockMembershipValidator(
+		&domain.OrgMember{TenantID: "tenant-1", UserID: "user-1", Role: domain.RoleDeveloper},
+	)
+	srv := newAuthzTestServerWithValidator(t, validator)
+	req := httptest.NewRequest(http.MethodGet, "/v1/admin/fees/collected", nil)
+	req.Header.Set("Authorization", "Bearer "+mustToken(t, domain.RoleDeveloper))
+	req.Header.Set("X-Request-ID", "req-role-test")
+	rec := httptest.NewRecorder()
+	srv.router.ServeHTTP(rec, req)
+
+	var body struct {
+		Error struct {
+			Code      string `json:"code"`
+			Status    int    `json:"status"`
+			RequestID string `json:"request_id"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode role middleware error: %v", err)
+	}
+	if rec.Code != http.StatusForbidden || body.Error.Status != rec.Code || body.Error.Code != "FORBIDDEN" {
+		t.Fatalf("unexpected role middleware error: HTTP %d, body %+v", rec.Code, body.Error)
+	}
+	if body.Error.RequestID != "req-role-test" || rec.Header().Get("X-Request-ID") != body.Error.RequestID {
+		t.Fatalf("request ID mismatch: body=%q header=%q", body.Error.RequestID, rec.Header().Get("X-Request-ID"))
+	}
+}
+
+func TestV1RouterErrorsUseStructuredEnvelope(t *testing.T) {
+	tests := []struct {
+		name       string
+		method     string
+		path       string
+		wantStatus int
+		wantCode   string
+	}{
+		{"not found", http.MethodGet, "/v1/not-a-route", http.StatusNotFound, "NOT_FOUND"},
+		{"method not allowed", http.MethodPut, "/v1/keys/", http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := newAuthzTestServerWithValidator(t, nil)
+			req := httptest.NewRequest(tc.method, tc.path, nil)
+			req.Header.Set("X-Request-ID", "req-router-test")
+			rec := httptest.NewRecorder()
+			srv.router.ServeHTTP(rec, req)
+
+			var body struct {
+				Error struct {
+					Code      string `json:"code"`
+					Message   string `json:"message"`
+					Status    int    `json:"status"`
+					RequestID string `json:"request_id"`
+				} `json:"error"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+				t.Fatalf("decode router error: %v", err)
+			}
+			if rec.Code != tc.wantStatus || body.Error.Status != tc.wantStatus || body.Error.Code != tc.wantCode {
+				t.Fatalf("unexpected router error: HTTP %d, body %+v", rec.Code, body.Error)
+			}
+			if body.Error.RequestID != "req-router-test" || rec.Header().Get("X-Request-ID") != body.Error.RequestID {
+				t.Fatalf("request ID mismatch: body=%q header=%q", body.Error.RequestID, rec.Header().Get("X-Request-ID"))
+			}
+		})
 	}
 }
 

@@ -73,6 +73,19 @@ describe('classifyError', () => {
     expect(err.statusCode).toBe(401);
   });
 
+  it('preserves the response request ID and embedded status', () => {
+    const err = classifyError(401, {
+      error: {
+        code: 'UNAUTHORIZED',
+        message: 'invalid api key',
+        status: 401,
+        request_id: 'req-sdk-test',
+      },
+    });
+    expect(err.statusCode).toBe(401);
+    expect(err.requestId).toBe('req-sdk-test');
+  });
+
   it('returns a plain FluxaError with code and message on 422', () => {
     const err = classifyError(422, envelope('QUOTE_EXPIRED', 'quote has expired'));
     expect(err).toBeInstanceOf(FluxaError);
