@@ -2,7 +2,9 @@ package fiat
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 
@@ -35,7 +37,14 @@ type Service interface {
 	GetQuote(ctx context.Context, req QuoteRequest) (*FiatQuote, error)
 	InitiateDeposit(ctx context.Context, req DepositRequest) (*DepositResponse, error)
 	InitiateWithdrawal(ctx context.Context, req WithdrawRequest) (*WithdrawResponse, error)
+	// HandleWebhook is the legacy single-signature form (kept for backward
+	// compatibility with existing tests and the Rail adapter).
 	HandleWebhook(ctx context.Context, payload []byte, signature string) error
+	// HandleWebhookWithHeaders is the preferred form used by the HTTP handler:
+	// it passes the full request headers so each provider can read its own
+	// signature header(s) (e.g. "verif-hash", "x-yellowcard-signature") without
+	// the HTTP layer hard-coding provider-specific header names.
+	HandleWebhookWithHeaders(ctx context.Context, payload []byte, headers http.Header) error
 }
 
 type service struct {
@@ -189,7 +198,35 @@ func (s *service) HandleWebhook(ctx context.Context, payload []byte, signature s
 	if err != nil {
 		return fmt.Errorf("handle webhook: %w", err)
 	}
+	return s.processEvent(ctx, evt)
+}
 
+// HandleWebhookWithHeaders is the HTTP-handler-facing entry point. It passes
+// the full header map to the rail so each provider can read its own signature
+// header(s) without the service layer knowing their names.
+//
+// Errors are wrapped with the appropriate sentinel (ErrWebhookSignatureInvalid,
+// ErrWebhookPayloadInvalid, ErrWebhookEventUnknown) when the failure is
+// permanent so the HTTP handler can distinguish 4xx from 5xx responses.
+func (s *service) HandleWebhookWithHeaders(ctx context.Context, payload []byte, headers http.Header) error {
+	evt, err := s.rail.HandleWebhookWithHeaders(ctx, payload, headers)
+	if err != nil {
+		// Wrap provider-level validation errors so the HTTP handler can map
+		// them to 4xx without inspecting the error string.
+		if errors.Is(err, ErrWebhookSignatureInvalid) ||
+			errors.Is(err, ErrWebhookPayloadInvalid) ||
+			errors.Is(err, ErrWebhookEventUnknown) {
+			return err
+		}
+		return fmt.Errorf("handle webhook: %w", err)
+	}
+
+	return s.processEvent(ctx, evt)
+}
+
+// processEvent applies the business logic for a fully-verified RailEvent.
+// It is shared by both HandleWebhook (legacy) and HandleWebhookWithHeaders.
+func (s *service) processEvent(ctx context.Context, evt *RailEvent) error {
 	if evt.Type == EventDepositConfirmed || evt.Type == EventDepositFailed {
 		deposit, err := s.repo.GetDepositByReference(ctx, evt.ProviderRef)
 		if err != nil {
@@ -220,8 +257,7 @@ func (s *service) HandleWebhook(ctx context.Context, payload []byte, signature s
 		// Atomically claim the deposit BEFORE moving any funds. This is
 		// what makes a concurrent or duplicate webhook delivery for the
 		// same event safe: only the caller that wins this pending ->
-		// processing transition proceeds to credit the wallet, so the
-		// same deposit can never be credited twice.
+		// processing transition proceeds to credit the wallet.
 		if err := s.repo.ClaimDepositForProcessing(ctx, deposit.ID); err != nil {
 			return nil // lost the race, or already handled — idempotent no-op
 		}

@@ -5,7 +5,7 @@ import (
 	"database/sql"
 	"time"
 
-	"github.com/Savitura/Fluxa/internal/domain"
+	"github.com/fluxa/fluxa/internal/domain"
 	"github.com/google/uuid"
 	"github.com/lib/pq"
 )
