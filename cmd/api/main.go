@@ -428,6 +428,7 @@ func main() {
 		beneficiaryHandler,
 		paymentLinkHandler,
 		refundHandler,
+		server.AuditScopeDenials(auditSvc),
 	)
 	server.RegisterDocsRoutes(srv.Router())
 

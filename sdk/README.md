@@ -210,11 +210,16 @@ const { summary } = await client.fees.listCollected({
 ### API Keys
 
 ```ts
-// Create
-const newKey = await client.keys.create({ label: "Production" });
+// Create a key limited to what the integration needs.
+// Reads (GET) need `<resource>:read`; anything that changes state needs `<resource>:write`.
+// Omit `scopes` for a full-access key (existing unscoped keys stay full-access).
+const newKey = await client.keys.create({
+  label: "Payouts integration",
+  scopes: ["wallets:read", "transfers:read", "batches:write"],
+});
 console.log(newKey.key); // Shown only once
 
-// List
+// List (includes each key's scopes, never the secret)
 const keys = await client.keys.list();
 
 // Revoke
@@ -251,6 +256,7 @@ import {
   NotFoundError,
   ValidationError,
   RateLimitError,
+  PermissionError,
 } from "@savitura/fluxa";
 
 try {
@@ -262,6 +268,9 @@ try {
     console.log("Rate limited, retry after:", err.retryAfter);
   } else if (err instanceof AuthenticationError) {
     console.log("Bad API key");
+  } else if (err instanceof PermissionError) {
+    // 403 INSUFFICIENT_SCOPE: the key is valid but lacks a scope
+    console.log("API key is missing scope:", err.requiredScope);
   } else if (err instanceof FluxaError) {
     console.log(`API error ${err.statusCode}: [${err.code}] ${err.message}`);
   }

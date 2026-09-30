@@ -49,6 +49,21 @@ export class RateLimitError extends FluxaError {
   }
 }
 
+/**
+ * 403 raised when the API key lacks a scope the operation needs
+ * (error code `INSUFFICIENT_SCOPE`). `requiredScope` names the missing scope.
+ */
+export class PermissionError extends FluxaError {
+  readonly requiredScope?: string;
+
+  constructor(body: FluxaErrorBody) {
+    super(403, body);
+    this.name = 'PermissionError';
+    const match = /required scope: (\S+)/.exec(body.message);
+    this.requiredScope = match?.[1];
+  }
+}
+
 export class ConflictError extends FluxaError {
   constructor(body: FluxaErrorBody) {
     super(409, body);
@@ -74,6 +89,10 @@ export function classifyError(status: number, body: unknown): FluxaError {
         return new ValidationError(parsed);
       case 401:
         return new AuthenticationError(parsed);
+      case 403:
+        return parsed.code === 'INSUFFICIENT_SCOPE'
+          ? new PermissionError(parsed)
+          : new FluxaError(status, parsed);
       case 404:
         return new NotFoundError(parsed);
       case 409:

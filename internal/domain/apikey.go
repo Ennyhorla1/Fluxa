@@ -25,6 +25,10 @@ const (
 	ScopeFeesRead           = "fees:read"
 	ScopeBeneficiariesRead  = "beneficiaries:read"
 	ScopeBeneficiariesWrite = "beneficiaries:write"
+	ScopeBatchesRead        = "batches:read"
+	ScopeBatchesWrite       = "batches:write"
+	ScopeReportsRead        = "reports:read"
+	ScopeReportsWrite       = "reports:write"
 	ScopeWildcard           = "*"
 )
 
@@ -47,6 +51,10 @@ var ValidScopes = map[string]bool{
 	ScopeFeesRead:           true,
 	ScopeBeneficiariesRead:  true,
 	ScopeBeneficiariesWrite: true,
+	ScopeBatchesRead:        true,
+	ScopeBatchesWrite:       true,
+	ScopeReportsRead:        true,
+	ScopeReportsWrite:       true,
 	ScopeWildcard:           true,
 	"admin":                 true,
 	"transfers:*":           true,
@@ -59,6 +67,17 @@ var ValidScopes = map[string]bool{
 	"fees:*":                true,
 	"beneficiaries:*":       true,
 	"audit:*":               true,
+	"batches:*":             true,
+	"reports:*":             true,
+}
+
+// legacyScopeGrants lists scopes that also satisfy a newer, narrower scope.
+// Batch payouts were gated by transfers:write before batches:* existed, so
+// keys issued with transfers scopes keep their batch access; new keys can be
+// limited to batches alone.
+var legacyScopeGrants = map[string][]string{
+	ScopeBatchesRead:  {ScopeTransfersRead},
+	ScopeBatchesWrite: {ScopeTransfersWrite},
 }
 
 type APIKey struct {
@@ -108,11 +127,24 @@ func (k *APIKey) NeedsRotationReminder(now time.Time) bool {
 }
 
 // HasScope checks if grantedScopes satisfy requiredScope.
-// An empty slice of grantedScopes represents unrestricted access (backwards compatibility).
+// An empty slice of grantedScopes represents unrestricted access: keys created
+// before scopes existed were migrated with no scopes and stay full-access.
 func HasScope(grantedScopes []string, requiredScope string) bool {
 	if len(grantedScopes) == 0 {
 		return true
 	}
+	if grantsScope(grantedScopes, requiredScope) {
+		return true
+	}
+	for _, legacy := range legacyScopeGrants[requiredScope] {
+		if grantsScope(grantedScopes, legacy) {
+			return true
+		}
+	}
+	return false
+}
+
+func grantsScope(grantedScopes []string, requiredScope string) bool {
 	for _, s := range grantedScopes {
 		if s == ScopeWildcard || s == "admin" || s == requiredScope {
 			return true

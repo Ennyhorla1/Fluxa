@@ -9,6 +9,7 @@ export {
   ValidationError,
   RateLimitError,
   ConflictError,
+  PermissionError,
 } from './errors';
 
 export type {
@@ -74,6 +75,8 @@ export type {
   ScheduleRunResponse,
   ListScheduleRunsResponse,
   // API Key
+  APIKeyScope,
+  APIKeyScopeResource,
   CreateKeyRequest,
   CreateKeyResponse,
   APIKeyResponse,
