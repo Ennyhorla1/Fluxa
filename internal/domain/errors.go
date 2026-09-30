@@ -37,6 +37,8 @@ var (
 	ErrForbidden                    = errors.New("insufficient permissions")
 	ErrWalletLimitReached           = errors.New("wallet creation limit reached for account type")
 	ErrTransferLimitReached         = errors.New("monthly transfer limit reached for account type")
+	ErrDailyTransferLimitReached    = errors.New("daily transfer limit reached for account type")
+	ErrDailyWithdrawalLimitReached  = errors.New("daily withdrawal limit reached for account type")
 	ErrWebhookLimitReached          = errors.New("webhook registration limit reached for account type")
 	ErrInsufficientSweepableBalance = errors.New("sweep amount exceeds sweepable balance")
 	ErrTreasuryConfigNotFound       = errors.New("treasury config not found for asset")

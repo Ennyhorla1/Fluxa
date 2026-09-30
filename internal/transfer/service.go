@@ -235,10 +235,12 @@ func (s *service) initiate(ctx context.Context, params TransferParams) (*domain.
 	tenantID := tenant.IDFromContext(ctx)
 	mode := tenant.ModeOrDefault(ctx, domain.ModeLive)
 	var monthlyLimit int
+	var dailyLimit int
 	if tenantID != "" && s.tenantRepo != nil {
 		t, err := s.tenantRepo.GetByID(ctx, tenantID)
 		if err == nil && t != nil {
 			monthlyLimit = t.GetTransferLimit()
+			dailyLimit = t.GetDailyTransferLimit()
 		}
 	}
 
@@ -340,8 +342,10 @@ func (s *service) initiate(ctx context.Context, params TransferParams) (*domain.
 	}
 
 	var createErr error
-	if monthlyLimit > 0 {
-		now := time.Now().UTC()
+	now := time.Now().UTC()
+	if dailyLimit > 0 {
+		createErr = s.repo.CreateWithDailyLimit(ctx, tx, tenantID, now, dailyLimit)
+	} else if monthlyLimit > 0 {
 		createErr = s.repo.CreateWithMonthlyLimit(ctx, tx, tenantID, now.Year(), now.Month(), monthlyLimit)
 	} else {
 		createErr = s.repo.Create(ctx, tx)
