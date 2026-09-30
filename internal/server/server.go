@@ -129,6 +129,11 @@ func New(
 		// Registered as a direct path because the authenticated group mounts /webhooks
 		r.With(webhook.VerifyRateLimit()).Post("/webhooks/verify", webhookHandler.VerifySignature)
 
+		// Fiat provider callbacks are intentionally public: a real payment
+		// provider (Flutterwave, Yellow Card) cannot present a Fluxa API key.
+		// Access control is HMAC signature verification inside the handler.
+		r.Route("/webhooks/fiat", fiatHandler.WebhookRoutes())
+
 		// Authenticated endpoints
 		r.Group(func(r chi.Router) {
 			r.Use(AuthMiddleware(apiKeyRepo, jwtSecret, membershipValidator))
@@ -191,7 +196,6 @@ func New(
 				}
 				r.Route("/wallets/{id}/deposit", fiatHandler.DepositRoutes())
 				r.Route("/wallets/{id}/withdraw", fiatHandler.WithdrawRoutes())
-				r.Route("/webhooks/fiat", fiatHandler.WebhookRoutes())
 				r.With(RequireScope(domain.ScopeFiatRead)).Route("/fiat", anchorFiatHandler.Routes())
 				if paymentLinkHandler != nil {
 					r.Route("/payment-links", paymentLinkHandler.Routes(
