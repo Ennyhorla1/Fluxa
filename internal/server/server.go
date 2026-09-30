@@ -28,6 +28,7 @@ import (
 	"github.com/fluxa/fluxa/internal/transfer"
 	"github.com/fluxa/fluxa/internal/treasury"
 	"github.com/fluxa/fluxa/internal/wallet"
+	"github.com/fluxa/fluxa/internal/wallet_balance_alert"
 	"github.com/fluxa/fluxa/internal/webhook"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -72,12 +73,15 @@ func New(
 
 	rateCfg := DefaultAuthRateLimitConfig()
 	var beneficiaryHandler *beneficiary.Handler
+	var walletBalanceAlertHandler *wallet_balance_alert.Handler
 	for _, option := range options {
 		switch value := option.(type) {
 		case AuthRateLimitConfig:
 			rateCfg = value
 		case *beneficiary.Handler:
 			beneficiaryHandler = value
+		case *wallet_balance_alert.Handler:
+			walletBalanceAlertHandler = value
 		}
 	}
 	authLimiter := NewAuthRateLimiter(rateCfg)
@@ -175,6 +179,9 @@ func New(
 				r.With(RequireScope(domain.ScopeWalletsRead)).Route("/wallets", walletHandler.Routes())
 				if beneficiaryHandler != nil {
 					r.With(RequireScope(domain.ScopeBeneficiariesRead)).Route("/beneficiaries", beneficiaryHandler.Routes())
+				}
+				if walletBalanceAlertHandler != nil {
+					r.With(RequireScope(domain.ScopeWalletBalanceAlertsRead)).Route("/wallet-balance-alerts", walletBalanceAlertHandler.Routes())
 				}
 				r.Route("/wallets/{id}/deposit", fiatHandler.DepositRoutes())
 				r.Route("/wallets/{id}/withdraw", fiatHandler.WithdrawRoutes())

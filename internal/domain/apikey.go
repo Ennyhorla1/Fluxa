@@ -25,6 +25,8 @@ const (
 	ScopeFeesRead           = "fees:read"
 	ScopeBeneficiariesRead  = "beneficiaries:read"
 	ScopeBeneficiariesWrite = "beneficiaries:write"
+	ScopeWalletBalanceAlertsRead  = "wallet_balance_alerts:read"
+	ScopeWalletBalanceAlertsWrite = "wallet_balance_alerts:write"
 	ScopeWildcard           = "*"
 )
 
@@ -44,21 +46,24 @@ var ValidScopes = map[string]bool{
 	ScopeComplianceWrite:    true,
 	ScopeFXRead:             true,
 	ScopeFXWrite:            true,
-	ScopeFeesRead:           true,
-	ScopeBeneficiariesRead:  true,
-	ScopeBeneficiariesWrite: true,
-	ScopeWildcard:           true,
-	"admin":                 true,
-	"transfers:*":           true,
-	"wallets:*":             true,
-	"webhooks:*":            true,
-	"keys:*":                true,
-	"fiat:*":                true,
-	"compliance:*":          true,
-	"fx:*":                  true,
-	"fees:*":                true,
-	"beneficiaries:*":       true,
-	"audit:*":               true,
+	ScopeFeesRead:                   true,
+	ScopeBeneficiariesRead:          true,
+	ScopeBeneficiariesWrite:         true,
+	ScopeWalletBalanceAlertsRead:    true,
+	ScopeWalletBalanceAlertsWrite:   true,
+	ScopeWildcard:                   true,
+	"admin":                         true,
+	"transfers:*":                   true,
+	"wallets:*":                     true,
+	"webhooks:*":                    true,
+	"keys:*":                        true,
+	"fiat:*":                        true,
+	"compliance:*":                  true,
+	"fx:*":                          true,
+	"fees:*":                        true,
+	"beneficiaries:*":               true,
+	"wallet_balance_alerts:*":      true,
+	"audit:*":                       true,
 }
 
 type APIKey struct {
