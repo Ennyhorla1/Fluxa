@@ -25,12 +25,15 @@ import (
 	"github.com/fluxa/fluxa/internal/fiat"
 	"github.com/fluxa/fluxa/internal/fiat/flutterwave"
 	"github.com/fluxa/fluxa/internal/fx"
+	"github.com/fluxa/fluxa/internal/health"
 	"github.com/fluxa/fluxa/internal/indexer"
 	"github.com/fluxa/fluxa/internal/logging"
 	"github.com/fluxa/fluxa/internal/org"
+	"github.com/fluxa/fluxa/internal/paymentlink"
 	"github.com/fluxa/fluxa/internal/postgres"
 	"github.com/fluxa/fluxa/internal/queue"
 	"github.com/fluxa/fluxa/internal/reconcile"
+	"github.com/fluxa/fluxa/internal/refund"
 	"github.com/fluxa/fluxa/internal/schedule"
 	"github.com/fluxa/fluxa/internal/server"
 	"github.com/fluxa/fluxa/internal/server/idempotency"
@@ -257,6 +260,7 @@ func main() {
 	fwProvider := flutterwave.NewProvider(cfg.FlutterwaveSecretKey, cfg.FlutterwaveWebhookHash)
 
 	fiatSvc := fiat.NewService(fiatRepo, fiat.NewRailAdapter(fwProvider), fxSvc, transferSvc, cfg.PlatformWalletID, "flutterwave", fiatRepo)
+	refundSvc := refund.NewService(postgres.NewRefundRepo(repoDB), transferSvc)
 
 	anchorRegistry := anchor.NewRegistry(anchorRepo, nil)
 	if err := anchorRegistry.Load(ctx); err != nil {
@@ -360,6 +364,8 @@ func main() {
 	transferHandler := transfer.NewHandler(transferSvc).WithIdempotency(transferIdemMW)
 	fxHandler := fx.NewHandler(fxSvc).WithIdempotency(idemMW)
 	fiatHandler := fiat.NewHandler(fiatSvc).WithIdempotency(idemMW)
+	paymentLinkHandler := paymentlink.NewHandler(paymentlink.NewService(postgres.NewPaymentLinkRepo(repoDB), fiatSvc)).WithIdempotency(idemMW).WithAuditLogger(auditSvc)
+	refundHandler := refund.NewHandler(refundSvc).WithIdempotency(idemMW).WithAuditLogger(auditSvc)
 	anchorFiatHandler := fiat.NewAnchorHandler(anchorFiatSvc)
 	anchorHandler := anchor.NewHandler(anchorRegistry)
 	feeHandler := fees.NewHandler(feeSvc)
@@ -371,7 +377,18 @@ func main() {
 		WithIdempotency(scheduleIdemMW).
 		WithAuditLogger(auditSvc)
 	treasuryHandler := treasury.NewHandler(treasurySvc).WithMutationGate(server.RequireRole(domain.RoleOwner, domain.RoleAdmin))
-	statusHandler := status.NewHandler(status.NewService(incidentRepo))
+	healthChecks := map[string]server.DependencyCheck{
+		"postgres": db.Ping,
+		"replica": func(ctx context.Context) error { return repoDB.ReplicaAvailable(ctx) },
+		"redis": func(ctx context.Context) error { return redisClient.Ping(ctx).Err() },
+		"horizon": server.HorizonDependencyCheck(cfg.StellarHorizonURL),
+		"worker": func(ctx context.Context) error { _, err := redisClient.Get(ctx, "fluxa:worker:heartbeat").Result(); return err },
+	}
+	healthHistoryRepo := postgres.NewDependencyHealthRepository(repoDB)
+	dependencyNames := []string{"postgres", "replica", "redis", "horizon", "worker"}
+	statusSvc := status.NewService(incidentRepo).WithDependencyHistory(healthHistoryRepo, dependencyNames)
+	statusHandler := status.NewHandler(statusSvc)
+	fluxahealth.NewSampler(healthChecks, healthHistoryRepo).Start(ctx)
 	beneficiaryHandler := beneficiary.NewHandler(beneficiarySvc)
 	walletBalanceAlertHandler := wallet_balance_alert.NewHandler(walletBalanceAlertSvc)
 
@@ -401,19 +418,7 @@ func main() {
 		feeHandler, reconcileHandler, apikeyHandler, apiKeyRepo,
 		webhookHandler, batchHandler, scheduleHandler, treasuryHandler, claimableHandler,
 		statusHandler, complianceHandler, auditHandler, usageHandler, idempotencyHandler, jwtSecretBytes, cfg.Port,
-		map[string]server.DependencyCheck{
-			"postgres": db.Ping,
-			"replica":  func(ctx context.Context) error { return repoDB.ReplicaAvailable(ctx) },
-			"redis":    func(ctx context.Context) error { return redisClient.Ping(ctx).Err() },
-
-			"horizon": server.HorizonDependencyCheck(cfg.StellarHorizonURL),
-			"worker": func(ctx context.Context) error {
-				if _, err := redisClient.Get(ctx, "fluxa:worker:heartbeat").Result(); err != nil {
-					return err
-				}
-				return nil
-			},
-		},
+		healthChecks,
 
 		orgRepo,
 		cfg.CORSAllowedOrigins,
@@ -425,6 +430,8 @@ func main() {
 		},
 		beneficiaryHandler,
 		walletBalanceAlertHandler,
+		paymentLinkHandler,
+		refundHandler,
 	)
 	server.RegisterDocsRoutes(srv.Router())
 

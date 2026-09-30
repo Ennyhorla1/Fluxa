@@ -11,6 +11,8 @@ import type {
   FiatDepositResponse,
   FiatWithdrawRequest,
   FiatWithdrawResponse,
+  PaymentLink,
+  Refund,
   FxConvertRequest,
   FxQuoteRequest,
   FxQuoteResponse,
@@ -190,10 +192,48 @@ export const api = {
       body: JSON.stringify(body),
     }),
   listAPIKeys: () => request<APIKey[]>('/v1/keys'),
-  createAPIKey: (label?: string, mode: EnvironmentMode = currentMode()) =>
-    request<CreateAPIKeyResponse>('/v1/keys', {
+  createAPIKey: (
+    params?:
+      | string
+      | {
+          label?: string;
+          mode?: EnvironmentMode;
+          expires_at?: string;
+          rotation_reminder_days?: number;
+        },
+    mode: EnvironmentMode = currentMode(),
+  ) => {
+    let body: Record<string, unknown> = {};
+    if (typeof params === 'string' || params === undefined) {
+      body = { label: params, mode };
+    } else {
+      body = {
+        label: params.label,
+        mode: params.mode || mode,
+        expires_at: params.expires_at,
+        rotation_reminder_days: params.rotation_reminder_days,
+      };
+    }
+    return request<CreateAPIKeyResponse>('/v1/keys', {
       method: 'POST',
-      body: JSON.stringify({ label, mode }),
+      body: JSON.stringify(body),
+    });
+  },
+  rotateAPIKey: (
+    id: string,
+    body?: { expires_in_days?: number; expires_at?: string; rotation_reminder_days?: number },
+  ) =>
+    request<CreateAPIKeyResponse>(`/v1/keys/${id}/rotate`, {
+      method: 'POST',
+      body: JSON.stringify(body || {}),
+    }),
+  updateAPIKeyExpiry: (
+    id: string,
+    body: { expires_at?: string | null; rotation_reminder_days?: number },
+  ) =>
+    request<APIKey>(`/v1/keys/${id}/expiry`, {
+      method: 'PATCH',
+      body: JSON.stringify(body),
     }),
   revokeAPIKey: (id: string) => request<void>(`/v1/keys/${id}`, { method: 'DELETE' }),
   getQuote: (body: FxQuoteRequest) =>
@@ -220,6 +260,24 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(body),
     }),
+  listPaymentLinks: () =>
+    request<{ payment_links: PaymentLink[] }>('/v1/payment-links'),
+  createPaymentLink: (body: { wallet_id: string; amount: string; currency: string; expires_at: string }) =>
+    request<PaymentLink>('/v1/payment-links', {
+      method: 'POST',
+      headers: { 'Idempotency-Key': globalThis.crypto.randomUUID() },
+      body: JSON.stringify(body),
+    }),
+  cancelPaymentLink: (id: string) =>
+    request<void>(`/v1/payment-links/${id}`, { method: 'DELETE' }),
+  createRefund: (body: { original_transaction_id: string; amount: string; reason?: string }) =>
+    request<Refund>('/v1/refunds', {
+      method: 'POST',
+      headers: { 'Idempotency-Key': globalThis.crypto.randomUUID() },
+      body: JSON.stringify(body),
+    }),
+  listRefunds: (transactionId: string) =>
+    request<{ refunds: Refund[] }>(`/v1/refunds?original_transaction_id=${encodeURIComponent(transactionId)}`),
   listSchedules: () => request<{ schedules: ScheduleResponse[] }>('/v1/schedules'),
   createSchedule: (body: ScheduleTransferRequest) =>
     request<ScheduleResponse>('/v1/schedules', {
