@@ -252,6 +252,17 @@ func (s *service) initiate(ctx context.Context, params TransferParams) (*domain.
 	if err != nil {
 		return nil, fmt.Errorf("destination wallet: %w", err)
 	}
+	// Fail before persisting/enqueuing a transfer when Horizon can confirm that
+	// the recipient account does not exist. A transient Horizon failure is
+	// returned as an error rather than being mistaken for an invalid account.
+	if client := s.client(ctx); client != nil {
+		if _, err := stellar.LoadAccountWithContext(ctx, client, dstWallet.PublicKey); err != nil {
+			if stellar.IsNotFound(err) {
+				return nil, domain.ErrBeneficiaryAccountNotFound
+			}
+			return nil, fmt.Errorf("validate destination Stellar account: %w", err)
+		}
+	}
 	if tenantID != "" && s.beneficiaries != nil {
 		configured, active, checkErr := s.beneficiaries.Check(ctx, dstWallet.PublicKey)
 		if checkErr != nil {
