@@ -4,12 +4,10 @@ import { useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { useAuth } from '@/lib/auth-context';
 import Sidebar from '@/components/Sidebar';
+import { StatusBanner } from '@/components/ui/status-banner';
+import { EnvironmentBanner } from '@/components/ui/environment-banner';
 
-export default function DashboardLayout({
-  children,
-}: {
-  children: React.ReactNode;
-}) {
+export default function DashboardLayout({ children }: { children: React.ReactNode }) {
   const { isAuthenticated } = useAuth();
   const router = useRouter();
 
@@ -29,6 +27,8 @@ export default function DashboardLayout({
 
   return (
     <div className="min-h-screen">
+      <EnvironmentBanner />
+      <StatusBanner />
       <Sidebar />
       <main className="ml-64 min-h-screen p-6 lg:p-10">
         <div className="mx-auto max-w-7xl">{children}</div>

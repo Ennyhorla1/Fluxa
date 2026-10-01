@@ -1,34 +1,34 @@
-import { HttpClient } from "../http";
+import { HttpClient, RequestOptions } from '../http';
+import { makeIdempotencyKey } from '../http';
 import {
   CreateTransferRequest,
   TransferResponse,
   ListTransactionsQuery,
   ListTransactionsResponse,
   BatchResponse,
-} from "../types";
+} from '../types';
+import { Page, createPage, paginate, paginateAll } from '../pagination';
 
 export class TransfersResource {
   constructor(private http: HttpClient) {}
 
   async create(
     request: CreateTransferRequest,
-    options?: { signal?: AbortSignal },
+    options?: RequestOptions,
   ): Promise<TransferResponse> {
     const res = await this.http.request<TransferResponse>({
-      method: "POST",
-      path: "/transfers",
+      method: 'POST',
+      path: '/transfers',
       body: request,
       signal: options?.signal,
+      idempotencyKey: options?.idempotencyKey ?? makeIdempotencyKey(),
     });
     return res.data;
   }
 
-  async get(
-    transferId: string,
-    options?: { signal?: AbortSignal },
-  ): Promise<TransferResponse> {
+  async get(transferId: string, options?: RequestOptions): Promise<TransferResponse> {
     const res = await this.http.request<TransferResponse>({
-      method: "GET",
+      method: 'GET',
       path: `/transfers/${encodeURIComponent(transferId)}`,
       signal: options?.signal,
     });
@@ -37,48 +37,84 @@ export class TransfersResource {
 
   async list(
     query: ListTransactionsQuery,
-    options?: { signal?: AbortSignal },
+    options?: RequestOptions,
   ): Promise<ListTransactionsResponse> {
     const res = await this.http.request<ListTransactionsResponse>({
-      method: "GET",
-      path: "/transactions",
+      method: 'GET',
+      path: '/transfers',
       query,
       signal: options?.signal,
     });
     return res.data;
   }
 
+  /**
+   * Fetches a single page of transfers formatted as a standard Page<TransferResponse>.
+   */
+  async listPage(
+    query: ListTransactionsQuery,
+    options?: RequestOptions,
+  ): Promise<Page<TransferResponse>> {
+    const res = await this.list(query, options);
+    const nextCursor = res.next_cursor ?? res.cursor ?? null;
+    return createPage(res.transactions ?? [], nextCursor);
+  }
+
+  /**
+   * Returns an async iterator that iterates over individual transfers across pages.
+   * Supports `for await (const transfer of client.transfers.iterate(query))`.
+   */
+  iterate(
+    query: ListTransactionsQuery,
+    options?: RequestOptions,
+  ): AsyncIterableIterator<TransferResponse> {
+    return paginate<TransferResponse, ListTransactionsQuery>({
+      fetchPage: (q, opts) => this.listPage(q, opts),
+      query,
+      options,
+    });
+  }
+
+  /**
+   * Fetches all transfers across all pages into a consolidated array.
+   */
+  async listAll(
+    query: ListTransactionsQuery,
+    options?: RequestOptions,
+  ): Promise<TransferResponse[]> {
+    return paginateAll<TransferResponse, ListTransactionsQuery>({
+      fetchPage: (q, opts) => this.listPage(q, opts),
+      query,
+      options,
+    });
+  }
+
   async createBatch(
-    request: import("../types").CreateBatchRequest,
-    options?: { signal?: AbortSignal },
+    request: import('../types').CreateBatchRequest,
+    options?: RequestOptions,
   ): Promise<BatchResponse> {
     const res = await this.http.request<BatchResponse>({
-      method: "POST",
-      path: "/transfers/batch",
+      method: 'POST',
+      path: '/transfers/batch',
       body: request,
       signal: options?.signal,
+      idempotencyKey: options?.idempotencyKey ?? makeIdempotencyKey(),
     });
     return res.data;
   }
 
-  async getBatch(
-    batchId: string,
-    options?: { signal?: AbortSignal },
-  ): Promise<BatchResponse> {
+  async getBatch(batchId: string, options?: RequestOptions): Promise<BatchResponse> {
     const res = await this.http.request<BatchResponse>({
-      method: "GET",
+      method: 'GET',
       path: `/transfers/batch/${encodeURIComponent(batchId)}`,
       signal: options?.signal,
     });
     return res.data;
   }
 
-  async exportBatch(
-    batchId: string,
-    options?: { signal?: AbortSignal },
-  ): Promise<string> {
+  async exportBatch(batchId: string, options?: RequestOptions): Promise<string> {
     const res = await this.http.request<string>({
-      method: "GET",
+      method: 'GET',
       path: `/transfers/batch/${encodeURIComponent(batchId)}/export`,
       signal: options?.signal,
     });

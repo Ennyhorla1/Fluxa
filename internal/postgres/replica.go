@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync/atomic"
 
@@ -100,6 +101,9 @@ type fallbackRow struct {
 
 func (r *fallbackRow) Scan(dest ...interface{}) error {
 	if err := r.replica.Scan(dest...); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return err
+		}
 		r.onFallback(err)
 		return r.primary.QueryRow(r.ctx, r.sql, r.args...).Scan(dest...)
 	}

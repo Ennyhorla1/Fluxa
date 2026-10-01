@@ -8,12 +8,12 @@ import (
 
 	"github.com/fluxa/fluxa/internal/domain"
 	"github.com/fluxa/fluxa/internal/fees"
+	"github.com/fluxa/fluxa/internal/server/idempotency"
 	"github.com/fluxa/fluxa/internal/stellar"
 	"github.com/fluxa/fluxa/internal/tenant"
 	walletpkg "github.com/fluxa/fluxa/internal/wallet"
 	"github.com/google/uuid"
 	"github.com/shopspring/decimal"
-	horizonclient "github.com/stellar/go/clients/horizonclient"
 )
 
 var ErrTransferFinal = errors.New("transfer already final")
@@ -28,6 +28,17 @@ type TenantGetter interface {
 type Screener interface {
 	ScreenTransfer(ctx context.Context, req domain.ScreeningRequest) (*domain.ScreeningDecision, error)
 	RecordHold(ctx context.Context, tx *domain.Transaction, decision *domain.ScreeningDecision) error
+}
+
+// BeneficiaryChecker is optional so existing tenants with no configured
+// allowlist retain their current transfer behaviour.
+type BeneficiaryChecker interface {
+	Check(ctx context.Context, account string) (configured, active bool, err error)
+}
+
+type ApprovalGate interface {
+	Plan(context.Context, string, string, decimal.Decimal) (*domain.TransferApprovalPolicy, error)
+	CreateRequest(context.Context, *domain.Transaction, string, *domain.TransferApprovalPolicy) error
 }
 
 type AuditEntry struct {
@@ -48,6 +59,18 @@ type ReconcileResult struct {
 	Drift    decimal.Decimal
 }
 
+type TransferParams struct {
+	FromID            string
+	ToID              string
+	Asset             string
+	Amount            decimal.Decimal
+	BatchID           string
+	Reference         string
+	ExternalReference *string
+	Tags              []string
+	IdempotencyKey    string
+}
+
 type Service interface {
 	InitiateTransfer(ctx context.Context, fromID, toID, asset string, amount decimal.Decimal) (*domain.Transaction, error)
 	// InitiateTransferIdempotent behaves like InitiateTransfer, but first
@@ -60,14 +83,23 @@ type Service interface {
 	InitiateBatchTransfer(ctx context.Context, fromID, toID, asset string, amount decimal.Decimal, batchID, reference string) (*domain.Transaction, error)
 	GetTransaction(ctx context.Context, id string) (*domain.Transaction, error)
 	ListTransactions(ctx context.Context, walletID string, limit, offset int) ([]*domain.Transaction, error)
-	WithStellarClient(stellarClient stellar.Client) Service
 	// WithScreener enables compliance screening. It is optional so the
 	// worker's screener-less wiring still compiles; when unset, transfers
 	// are not screened.
-	WithScreener(screener Screener) Service
-	ForceSettleTransfer(ctx context.Context, id, actor string) (*domain.Transaction, error)
-	ReconcileWallet(ctx context.Context, walletID, actor string) (*ReconcileResult, error)
-	WithAuditLogger(audit AuditLogger) Service
+}
+
+func ConfigureStellarClient(svc Service, client stellar.Client) Service {
+	if configurable, ok := svc.(interface{ WithStellarClient(stellar.Client) Service }); ok {
+		return configurable.WithStellarClient(client)
+	}
+	return svc
+}
+
+func ConfigureScreener(svc Service, screener Screener) Service {
+	if configurable, ok := svc.(interface{ WithScreener(Screener) Service }); ok {
+		return configurable.WithScreener(screener)
+	}
+	return svc
 }
 
 // Queue is the subset of the asynq-backed queue client the transfer service
@@ -78,14 +110,17 @@ type Queue interface {
 }
 
 type service struct {
-	repo       Repository
-	walletRepo walletpkg.Repository
-	feeSvc     fees.Service
-	queue      Queue
-	tenantRepo TenantGetter
-	stellar    stellar.Client
-	screener   Screener
-	audit      AuditLogger
+	repo           Repository
+	walletRepo     walletpkg.Repository
+	feeSvc         fees.Service
+	queue          Queue
+	tenantRepo     TenantGetter
+	stellar        stellar.Client
+	clientResolver stellar.ClientResolver
+	screener       Screener
+	audit          AuditLogger
+	beneficiaries  BeneficiaryChecker
+	approvals      ApprovalGate
 }
 
 func NewService(repo Repository, walletRepo walletpkg.Repository, feeSvc fees.Service, q Queue, tenantRepo ...TenantGetter) Service {
@@ -101,6 +136,57 @@ func (s *service) WithStellarClient(stellarClient stellar.Client) Service {
 	return s
 }
 
+func (s *service) WithClientResolver(resolver stellar.ClientResolver) Service {
+	s.clientResolver = resolver
+	return s
+}
+
+func (s *service) client(ctx context.Context) stellar.Client {
+	if s.clientResolver != nil {
+		if resolved := s.clientResolver.ClientForMode(ctx); resolved != nil {
+			return resolved
+		}
+	}
+	return s.stellar
+}
+
+// ConfigureClientResolver attaches mode-aware Horizon selection without
+// expanding the legacy Service interface implemented by downstream fakes.
+func ConfigureClientResolver(svc Service, resolver stellar.ClientResolver) Service {
+	if configurable, ok := svc.(interface {
+		WithClientResolver(stellar.ClientResolver) Service
+	}); ok {
+		return configurable.WithClientResolver(resolver)
+	}
+	return svc
+}
+
+func ConfigureBeneficiaryChecker(svc Service, checker BeneficiaryChecker) Service {
+	if configurable, ok := svc.(interface {
+		WithBeneficiaryChecker(BeneficiaryChecker) Service
+	}); ok {
+		return configurable.WithBeneficiaryChecker(checker)
+	}
+	return svc
+}
+
+func ConfigureApprovalGate(svc Service, gate ApprovalGate) Service {
+	if configurable, ok := svc.(interface{ WithApprovalGate(ApprovalGate) Service }); ok {
+		return configurable.WithApprovalGate(gate)
+	}
+	return svc
+}
+
+func (s *service) WithApprovalGate(gate ApprovalGate) Service {
+	s.approvals = gate
+	return s
+}
+
+func (s *service) WithBeneficiaryChecker(checker BeneficiaryChecker) Service {
+	s.beneficiaries = checker
+	return s
+}
+
 func (s *service) WithScreener(screener Screener) Service {
 	s.screener = screener
 	return s
@@ -112,35 +198,77 @@ func (s *service) WithAuditLogger(audit AuditLogger) Service {
 }
 
 func (s *service) InitiateTransfer(ctx context.Context, fromID, toID, asset string, amount decimal.Decimal) (*domain.Transaction, error) {
-	return s.initiate(ctx, fromID, toID, asset, amount, "", "", "")
+	return s.initiate(ctx, TransferParams{
+		FromID: fromID,
+		ToID:   toID,
+		Asset:  asset,
+		Amount: amount,
+	})
 }
 
 func (s *service) InitiateTransferIdempotent(ctx context.Context, fromID, toID, asset string, amount decimal.Decimal, idempotencyKey string) (*domain.Transaction, error) {
-	if idempotencyKey != "" {
-		if existing, err := s.repo.GetByIdempotencyKey(ctx, tenant.IDFromContext(ctx), idempotencyKey); err == nil {
+	return s.InitiateTransferExt(ctx, TransferParams{
+		FromID:         fromID,
+		ToID:           toID,
+		Asset:          asset,
+		Amount:         amount,
+		IdempotencyKey: idempotencyKey,
+	})
+}
+
+func (s *service) InitiateBatchTransfer(ctx context.Context, fromID, toID, asset string, amount decimal.Decimal, batchID, reference string) (*domain.Transaction, error) {
+	return s.initiate(ctx, TransferParams{
+		FromID:    fromID,
+		ToID:      toID,
+		Asset:     asset,
+		Amount:    amount,
+		BatchID:   batchID,
+		Reference: reference,
+	})
+}
+
+func (s *service) InitiateTransferExt(ctx context.Context, params TransferParams) (*domain.Transaction, error) {
+	if params.IdempotencyKey != "" {
+		if recordRepo, ok := s.repo.(IdempotencyRecordRepository); ok {
+			if recordID := idempotency.RecordIDFromContext(ctx); recordID != "" {
+				if existing, err := recordRepo.GetByIdempotencyRecordID(ctx, recordID); err == nil {
+					return existing, nil
+				} else if !errors.Is(err, domain.ErrTransactionNotFound) {
+					return nil, fmt.Errorf("check idempotency record: %w", err)
+				}
+			}
+		}
+		if existing, err := s.repo.GetByIdempotencyKey(ctx, tenant.IDFromContext(ctx), params.IdempotencyKey); err == nil {
 			return existing, nil
 		} else if !errors.Is(err, domain.ErrTransactionNotFound) {
 			return nil, fmt.Errorf("check idempotency key: %w", err)
 		}
 	}
-	return s.initiate(ctx, fromID, toID, asset, amount, "", "", idempotencyKey)
+	return s.initiate(ctx, params)
 }
 
-func (s *service) InitiateBatchTransfer(ctx context.Context, fromID, toID, asset string, amount decimal.Decimal, batchID, reference string) (*domain.Transaction, error) {
-	return s.initiate(ctx, fromID, toID, asset, amount, batchID, reference, "")
-}
+func (s *service) initiate(ctx context.Context, params TransferParams) (*domain.Transaction, error) {
+	fromID := params.FromID
+	toID := params.ToID
+	asset := params.Asset
+	amount := params.Amount
+	batchID := params.BatchID
+	reference := params.Reference
+	idempotencyKey := params.IdempotencyKey
 
-func (s *service) initiate(ctx context.Context, fromID, toID, asset string, amount decimal.Decimal, batchID, reference, idempotencyKey string) (*domain.Transaction, error) {
 	if fromID == toID {
 		return nil, domain.ErrSelfTransfer
 	}
 
 	tenantID := tenant.IDFromContext(ctx)
+	mode := tenant.ModeOrDefault(ctx, domain.ModeLive)
 	var monthlyLimit int
+	var dailyLimit int
 	if tenantID != "" && s.tenantRepo != nil {
 		t, err := s.tenantRepo.GetByID(ctx, tenantID)
 		if err == nil && t != nil {
 			monthlyLimit = t.GetTransferLimit()
+			dailyLimit = t.GetDailyTransferLimit()
 		}
 	}
 
@@ -152,6 +280,26 @@ func (s *service) initiate(ctx context.Context, fromID, toID, asset string, amou
 	if err != nil {
 		return nil, fmt.Errorf("destination wallet: %w", err)
 	}
+	// Fail before persisting/enqueuing a transfer when Horizon can confirm that
+	// the recipient account does not exist. A transient Horizon failure is
+	// returned as an error rather than being mistaken for an invalid account.
+	if client := s.client(ctx); client != nil {
+		if _, err := stellar.LoadAccountWithContext(ctx, client, dstWallet.PublicKey); err != nil {
+			if stellar.IsNotFound(err) {
+				return nil, domain.ErrBeneficiaryAccountNotFound
+			}
+			return nil, fmt.Errorf("validate destination Stellar account: %w", err)
+		}
+	}
+	if tenantID != "" && s.beneficiaries != nil {
+		configured, active, checkErr := s.beneficiaries.Check(ctx, dstWallet.PublicKey)
+		if checkErr != nil {
+			return nil, fmt.Errorf("check beneficiary: %w", checkErr)
+		}
+		if configured && !active {
+			return nil, domain.ErrBeneficiaryNotAllowed
+		}
+	}
 
 	// Validate trustline on source wallet for non-XLM assets
 	if asset != "XLM" {
@@ -160,9 +308,6 @@ func (s *service) initiate(ctx context.Context, fromID, toID, asset string, amou
 		}
 	}
 
-	// Screening runs here rather than in the handler so that batch transfers
-	// and scheduled payouts, which both funnel through initiate(), are covered
-	// by the same call.
 	status := domain.StatusPending
 	var decision *domain.ScreeningDecision
 	if s.screener != nil {
@@ -176,9 +321,6 @@ func (s *service) initiate(ctx context.Context, fromID, toID, asset string, amou
 			Amount:        amount,
 		})
 		if err != nil || decision == nil {
-			// Fail closed. A screening failure must never become a pass, so an
-			// unusable result is treated as a hold rather than propagated as a
-			// 500 that a client would simply retry.
 			decision = &domain.ScreeningDecision{
 				Status:     domain.ScreeningHold,
 				RulesFired: []string{"screener_error"},
@@ -189,8 +331,6 @@ func (s *service) initiate(ctx context.Context, fromID, toID, asset string, amou
 
 		switch decision.Status {
 		case domain.ScreeningBlocked:
-			// No transaction row is written: the compliance_blocks row the
-			// screener already persisted is the record of this attempt.
 			return nil, domain.ErrTransferBlockedSanctions
 		case domain.ScreeningHold:
 			status = domain.StatusComplianceHold
@@ -212,41 +352,92 @@ func (s *service) initiate(ctx context.Context, fromID, toID, asset string, amou
 		batchPtr = &batchID
 	}
 
-	tx := &domain.Transaction{
-		ID:             uuid.New().String(),
-		Type:           domain.TypeTransfer,
-		Status:         status,
-		FromWallet:     fromID,
-		ToWallet:       toID,
-		Asset:          asset,
-		Amount:         amount,
-		Fee:            feeResult.FeeAmount,
-		FeeBps:         feeResult.FeeBps,
-		TenantID:       tenantPtr,
-		BatchID:        batchPtr,
-		Reference:      reference,
-		CreatedAt:      time.Now().UTC(),
-		IdempotencyKey: idempotencyKey,
+	tags := params.Tags
+	if tags == nil {
+		tags = []string{}
 	}
 
-	if monthlyLimit > 0 {
-		now := time.Now().UTC()
-		if err := s.repo.CreateWithMonthlyLimit(ctx, tx, tenantID, now.Year(), now.Month(), monthlyLimit); err != nil {
-			return nil, err
+	tx := &domain.Transaction{
+		ID:                uuid.New().String(),
+		Type:              domain.TypeTransfer,
+		Status:            status,
+		FromWallet:        fromID,
+		ToWallet:          toID,
+		Asset:             asset,
+		Amount:            amount,
+		Fee:               feeResult.FeeAmount,
+		FeeBps:            feeResult.FeeBps,
+		TenantID:          tenantPtr,
+		Mode:              mode,
+		BatchID:           batchPtr,
+		Reference:         reference,
+		ExternalReference: params.ExternalReference,
+		Tags:              tags,
+		CreatedAt:         time.Now().UTC(),
+		IdempotencyKey:    idempotencyKey,
+	}
+	var approvalPolicy *domain.TransferApprovalPolicy
+	if status == domain.StatusPending && s.approvals != nil && tenantID != "" {
+		approvalPolicy, err = s.approvals.Plan(ctx, tenantID, asset, amount)
+		if err != nil {
+			return nil, fmt.Errorf("check transfer approval policy: %w", err)
 		}
-	} else {
-		if err := s.repo.Create(ctx, tx); err != nil {
-			return nil, fmt.Errorf("persist transaction: %w", err)
+		if approvalPolicy != nil {
+			tx.Status = domain.StatusApprovalPending
 		}
 	}
+	if recordID := idempotency.RecordIDFromContext(ctx); recordID != "" && idempotencyKey != "" {
+		tx.IdempotencyRecordID = &recordID
+	}
+
+	var createErr error
+	now := time.Now().UTC()
+	if dailyLimit > 0 {
+		dailyRepo, ok := s.repo.(interface {
+			CreateWithDailyLimit(context.Context, *domain.Transaction, string, time.Time, int) error
+		})
+		if !ok {
+			return nil, errors.New("daily transfer limit enforcement is unavailable")
+		}
+		createErr = dailyRepo.CreateWithDailyLimit(ctx, tx, tenantID, now, dailyLimit)
+	} else if monthlyLimit > 0 {
+		createErr = s.repo.CreateWithMonthlyLimit(ctx, tx, tenantID, now.Year(), now.Month(), monthlyLimit)
+	} else {
+		createErr = s.repo.Create(ctx, tx)
+	}
+	if createErr != nil {
+		if tx.IdempotencyRecordID != nil && errors.Is(createErr, domain.ErrConcurrentUpdate) {
+			if recordRepo, ok := s.repo.(IdempotencyRecordRepository); ok {
+				if existing, lookupErr := recordRepo.GetByIdempotencyRecordID(ctx, *tx.IdempotencyRecordID); lookupErr == nil {
+					return existing, nil
+				}
+			}
+		}
+		return nil, createErr
+	}
+
+	actor := "system"
+	if uID := tenant.UserIDFromContext(ctx); uID != "" {
+		actor = uID
+	} else if kID := tenant.APIKeyIDFromContext(ctx); kID != "" {
+		actor = kID
+	}
+	if approvalPolicy != nil {
+		creatorID := tenant.UserIDFromContext(ctx)
+		if err := s.approvals.CreateRequest(ctx, tx, creatorID, approvalPolicy); err != nil {
+			_ = s.repo.UpdateStatus(ctx, tx.ID, domain.StatusFailed, "")
+			return nil, fmt.Errorf("create transfer approval request: %w", err)
+		}
+	}
+	s.recordAudit(ctx, actor, "transfer.created", tx.ID)
 
 	if tx.Status == domain.StatusComplianceHold {
-		// Deliberately not enqueued. The transfer stays parked until a
-		// compliance officer approves it, which resets the row to pending and
-		// enqueues it then.
 		if err := s.screener.RecordHold(ctx, tx, decision); err != nil {
 			return nil, fmt.Errorf("record compliance hold: %w", err)
 		}
+		return tx, nil
+	}
+	if tx.Status == domain.StatusApprovalPending {
 		return tx, nil
 	}
 
@@ -264,10 +455,9 @@ func (s *service) validateTrustline(ctx context.Context, walletID, publicKey, as
 	hasTrustline := false
 
 	if s.stellar != nil {
-		acct, err := stellar.LoadAccountWithContext(ctx, s.stellar, publicKey)
+		acct, err := stellar.LoadAccountWithContext(ctx, s.client(ctx), publicKey)
 		if err != nil {
-			hErr, ok := err.(*horizonclient.Error)
-			if ok && hErr.Response.Status == "404" {
+			if stellar.IsNotFound(err) {
 				return domain.NewErrNoTrustline(asset)
 			}
 		} else {
@@ -283,7 +473,6 @@ func (s *service) validateTrustline(ctx context.Context, walletID, publicKey, as
 		}
 	}
 
-	// Fallback check in DB cached balances
 	cached, err := s.walletRepo.GetBalances(ctx, walletID)
 	if err == nil {
 		for _, b := range cached {
@@ -305,6 +494,62 @@ func (s *service) GetTransaction(ctx context.Context, id string) (*domain.Transa
 	return s.repo.GetByID(ctx, id)
 }
 
+func (s *service) CancelTransfer(ctx context.Context, id, actor, idempotencyKey string) (*domain.Transaction, error) {
+	tx, err := s.repo.GetByID(ctx, id)
+	if err != nil {
+		return nil, fmt.Errorf("get transaction: %w", err)
+	}
+
+	// Only pending or compliance_hold transfers (with no tx_hash) can be cancelled.
+	// This is the pre-submission boundary: once the settlement engine has claimed
+	// the transaction (status -> submitted) or a tx_hash has been recorded, cancellation
+	// is refused.
+	if tx.Status != domain.StatusPending && tx.Status != domain.StatusComplianceHold {
+		return nil, &domain.ErrTransferNotCancellable{
+			Status: string(tx.Status),
+			TxHash: tx.TxHash,
+		}
+	}
+
+	// Attempt to set status='cancelled' via a conditional UPDATE.
+	// The WHERE clause makes this a single conditional UPDATE:
+	//   UPDATE transactions SET status = 'cancelled' WHERE id = $1
+	// AND status IN ('pending','compliance_hold') AND tx_hash IS NULL.
+	// Only one caller can win this transition; concurrent callers race on the same row.
+	if err := s.repo.UpdateStatus(ctx, id, domain.StatusCancelled, ""); err != nil {
+		return nil, fmt.Errorf("cancel transaction: %w", err)
+	}
+
+	// Read the updated transaction to determine the outcome.
+	tx, err = s.repo.GetByID(ctx, id)
+	if err != nil {
+		return nil, fmt.Errorf("get transaction after cancel: %w", err)
+	}
+
+	// If the status is now cancelled, the cancellation succeeded.
+	if tx.Status == domain.StatusCancelled {
+		// Record audit log entry with the acting principal.
+		s.recordAudit(ctx, actor, "transfer.cancel", id)
+		// Dispatch webhook event for cancellation.
+		_ = s.dispatchCancelWebhook(ctx, id, actor)
+		// Return the updated transaction (idempotent: cancelling an already-cancelled
+		// transfer succeeds and just returns the current state).
+		return tx, nil
+	}
+
+	// The UPDATE did not set the status to cancelled (should not happen given the
+	// pre-check, but handle it defensively). Return the current state plainly.
+	return nil, &domain.ErrTransferNotCancellable{
+		Status: string(tx.Status),
+		TxHash: tx.TxHash,
+	}
+}
+
+func (s *service) dispatchCancelWebhook(ctx context.Context, id, actor string) error {
+	s.recordAudit(ctx, actor, "transfer.cancel", id)
+	return nil
+}
+
 func (s *service) ListTransactions(ctx context.Context, walletID string, limit, offset int) ([]*domain.Transaction, error) {
 	if limit <= 0 || limit > 100 {
 		limit = 20
@@ -312,12 +557,25 @@ func (s *service) ListTransactions(ctx context.Context, walletID string, limit, 
 	return s.repo.ListByWallet(ctx, walletID, limit, offset)
 }
 
+func (s *service) ListTransactionsFiltered(ctx context.Context, filter domain.TransactionFilter) ([]*domain.Transaction, error) {
+	if filter.Limit <= 0 || filter.Limit > 100 {
+		filter.Limit = 20
+	}
+	if filterRepo, ok := s.repo.(FilterableRepository); ok {
+		return filterRepo.ListWithFilter(ctx, filter)
+	}
+	if filter.WalletID != "" {
+		return s.repo.ListByWallet(ctx, filter.WalletID, filter.Limit, filter.Offset)
+	}
+	return nil, nil
+}
+
 func (s *service) ForceSettleTransfer(ctx context.Context, id, actor string) (*domain.Transaction, error) {
 	tx, err := s.repo.GetByID(ctx, id)
 	if err != nil {
 		return nil, fmt.Errorf("get transaction: %w", err)
 	}
-	if tx.Status == domain.StatusSettled || tx.Status == domain.StatusFailed || tx.Status == domain.StatusReversed {
+	if tx.Status == domain.StatusConfirmed || tx.Status == domain.StatusFailed || tx.Status == domain.StatusReconciliationFailed {
 		return nil, ErrTransferFinal
 	}
 	if s.queue == nil {

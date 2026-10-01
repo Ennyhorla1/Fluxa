@@ -1,12 +1,14 @@
-import { HttpClient, HttpClientConfig } from "./http";
-import { WalletsResource } from "./resources/wallets";
-import { TransfersResource } from "./resources/transfers";
-import { FXResource } from "./resources/fx";
-import { SchedulesResource } from "./resources/schedules";
-import { WebhooksResource } from "./resources/webhooks";
-import { FeesResource } from "./resources/fees";
-import { KeysResource } from "./resources/keys";
-import { FiatResource } from "./resources/fiat";
+import { HttpClient, HttpClientConfig } from './http';
+import { WalletsResource } from './resources/wallets';
+import { TransfersResource } from './resources/transfers';
+import { FXResource } from './resources/fx';
+import { SchedulesResource } from './resources/schedules';
+import { WebhooksResource } from './resources/webhooks';
+import { FeesResource } from './resources/fees';
+import { KeysResource } from './resources/keys';
+import { FiatResource } from './resources/fiat';
+import { PaymentLinksResource } from './resources/payment_links';
+import { RefundsResource } from './resources/refunds';
 
 export interface FluxaClientConfig {
   apiKey: string;
@@ -14,11 +16,21 @@ export interface FluxaClientConfig {
   timeout?: number;
   maxRetries?: number;
   retryDelay?: number;
+  /**
+   * Default idempotency key to use for financial mutations when the caller does not
+   * supply one. Useful for cross-process retries where the key must be stable.
+   */
+  idempotencyKey?: string;
+  /**
+   * When true, requests without an idempotency key will throw before being sent.
+   * Defaults to false.
+   */
+  requireIdempotencyKey?: boolean;
 }
 
-const DEFAULT_BASE_URL = "https://api.fluxa.io";
+const DEFAULT_BASE_URL = 'https://api.fluxa.io';
 const DEFAULT_TIMEOUT = 30_000;
-const DEFAULT_MAX_RETRIES = 3;
+const DEFAULT_MAX_RETRIES = 0;
 const DEFAULT_RETRY_DELAY = 500;
 
 export class FluxaClient {
@@ -30,20 +42,24 @@ export class FluxaClient {
   readonly fees: FeesResource;
   readonly keys: KeysResource;
   readonly fiat: FiatResource;
+  readonly paymentLinks: PaymentLinksResource;
+  readonly refunds: RefundsResource;
 
   private http: HttpClient;
 
   constructor(config: FluxaClientConfig) {
     if (!config.apiKey) {
-      throw new Error("apiKey is required");
+      throw new Error('apiKey is required');
     }
 
     const httpConfig: HttpClientConfig = {
       baseUrl: config.baseUrl ?? DEFAULT_BASE_URL,
       apiKey: config.apiKey,
-      timeout: config.timeout ?? DEFAULT_TIMEOUT,
-      maxRetries: config.maxRetries ?? DEFAULT_MAX_RETRIES,
-      retryDelay: config.retryDelay ?? DEFAULT_RETRY_DELAY,
+      timeout: config.timeout && config.timeout > 0 ? config.timeout : DEFAULT_TIMEOUT,
+      maxRetries: Math.max(0, config.maxRetries ?? DEFAULT_MAX_RETRIES),
+      retryDelay: Math.max(0, config.retryDelay ?? DEFAULT_RETRY_DELAY),
+      idempotencyKey: config.idempotencyKey,
+      requireIdempotencyKey: config.requireIdempotencyKey ?? false,
     };
 
     this.http = new HttpClient(httpConfig);
@@ -55,6 +71,8 @@ export class FluxaClient {
     this.fees = new FeesResource(this.http);
     this.keys = new KeysResource(this.http);
     this.fiat = new FiatResource(this.http);
+    this.paymentLinks = new PaymentLinksResource(this.http);
+    this.refunds = new RefundsResource(this.http);
   }
 
   async health(options?: { signal?: AbortSignal }): Promise<{
@@ -65,8 +83,8 @@ export class FluxaClient {
       status: string;
       services?: Record<string, string>;
     }>({
-      method: "GET",
-      path: "/../health",
+      method: 'GET',
+      path: '/../health',
       signal: options?.signal,
     });
     return res.data;

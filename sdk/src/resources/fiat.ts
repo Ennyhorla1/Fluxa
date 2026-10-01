@@ -1,10 +1,5 @@
-import { HttpClient } from "../http";
-import {
-  DepositRequest,
-  DepositResponse,
-  WithdrawRequest,
-  WithdrawResponse,
-} from "../types";
+import { HttpClient, RequestOptions, makeIdempotencyKey } from '../http';
+import { DepositRequest, DepositResponse, WithdrawRequest, WithdrawResponse } from '../types';
 
 export class FiatResource {
   constructor(private http: HttpClient) {}
@@ -12,13 +7,14 @@ export class FiatResource {
   async deposit(
     walletId: string,
     request: DepositRequest,
-    options?: { signal?: AbortSignal },
+    options?: RequestOptions,
   ): Promise<DepositResponse> {
     const res = await this.http.request<DepositResponse>({
-      method: "POST",
+      method: 'POST',
       path: `/wallets/${encodeURIComponent(walletId)}/deposit/fiat`,
       body: request,
       signal: options?.signal,
+      idempotencyKey: options?.idempotencyKey ?? makeIdempotencyKey(),
     });
     return res.data;
   }
@@ -26,13 +22,14 @@ export class FiatResource {
   async withdraw(
     walletId: string,
     request: WithdrawRequest,
-    options?: { signal?: AbortSignal },
+    options?: RequestOptions,
   ): Promise<WithdrawResponse> {
     const res = await this.http.request<WithdrawResponse>({
-      method: "POST",
+      method: 'POST',
       path: `/wallets/${encodeURIComponent(walletId)}/withdraw/fiat`,
       body: request,
       signal: options?.signal,
+      idempotencyKey: options?.idempotencyKey ?? makeIdempotencyKey(),
     });
     return res.data;
   }

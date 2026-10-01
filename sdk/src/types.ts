@@ -17,16 +17,25 @@ export interface GetBalancesResponse {
   balances: Balance[];
 }
 
+export interface CreateTrustlineRequest {
+  asset_code: string;
+  asset_issuer: string;
+  limit?: string;
+}
+
+export interface TrustlineResponse {
+  wallet_id: string;
+  asset_code: string;
+  asset_issuer: string;
+  status: string;
+}
+
 // ── Transaction / Transfer ──────────────────────────────────────────────────
 
 export type TransactionStatus =
-  | "pending"
-  | "submitted"
-  | "confirmed"
-  | "failed"
-  | "reconciliation_failed";
+  'pending' | 'submitted' | 'confirmed' | 'failed' | 'reconciliation_failed';
 
-export type TransactionType = "transfer" | "conversion" | "funding";
+export type TransactionType = 'transfer' | 'conversion' | 'funding';
 
 export interface CreateTransferRequest {
   from_wallet_id: string;
@@ -47,6 +56,8 @@ export interface TransferResponse {
   fee_amount: string;
   net_amount: string;
   fee_bps: number;
+  failure_reason?: string;
+  failure_message?: string;
   created_at: string;
 }
 
@@ -54,20 +65,22 @@ export interface ListTransactionsQuery {
   wallet_id: string;
   limit?: number;
   offset?: number;
+  cursor?: string;
+  external_reference?: string;
+  tag?: string;
+  [key: string]: unknown;
 }
 
 export interface ListTransactionsResponse {
   transactions: TransferResponse[];
+  next_cursor?: string | null;
+  cursor?: string | null;
 }
 
 // ── Batch ───────────────────────────────────────────────────────────────────
 
 export type BatchStatus =
-  | "pending"
-  | "processing"
-  | "partial"
-  | "completed"
-  | "failed";
+  'pending' | 'processing' | 'partial' | 'completed' | 'failed' | 'compliance_hold';
 
 export interface BatchItemRequest {
   to_wallet_id: string;
@@ -89,6 +102,8 @@ export interface BatchTransferResponse {
   reference?: string;
   status: TransactionStatus;
   tx_hash?: string;
+  failure_reason?: string;
+  failure_message?: string;
 }
 
 export interface BatchResponse {
@@ -97,6 +112,7 @@ export interface BatchResponse {
   total_count: number;
   success_count: number;
   failed_count: number;
+  held_count: number;
   created_at: string;
   transfers?: BatchTransferResponse[];
 }
@@ -216,16 +232,58 @@ export interface WithdrawResponse {
   status: string;
 }
 
+export interface CreatePaymentLinkRequest {
+  wallet_id: string;
+  amount: string;
+  currency: string;
+  expires_at: string;
+}
+
+export interface PaymentLinkResponse {
+  id: string;
+  token: string;
+  wallet_id: string;
+  amount: string;
+  currency: string;
+  status: 'active' | 'processing' | 'paid' | 'failed' | 'cancelled' | 'expired';
+  checkout_url: string;
+  expires_at: string;
+  created_at?: string;
+}
+
+export interface PaymentLinksResponse {
+  payment_links: PaymentLinkResponse[];
+}
+
+export interface CreateRefundRequest {
+  original_transaction_id: string;
+  amount: string;
+  reason?: string;
+}
+
+export interface RefundResponse {
+  id: string;
+  original_transaction_id: string;
+  transaction_id?: string;
+  amount: string;
+  reason?: string;
+  status: 'requested' | 'pending' | 'succeeded' | 'failed';
+}
+
+export interface RefundsResponse {
+  refunds: RefundResponse[];
+}
+
 // ── Webhook ─────────────────────────────────────────────────────────────────
 
 export type EventType =
-  | "transfer.initiated"
-  | "transfer.settled"
-  | "transfer.failed"
-  | "wallet.funded"
-  | "conversion.completed";
+  | 'transfer.initiated'
+  | 'transfer.settled'
+  | 'transfer.failed'
+  | 'wallet.funded'
+  | 'conversion.completed';
 
-export type DeliveryStatus = "pending" | "success" | "failed";
+export type DeliveryStatus = 'pending' | 'success' | 'failed';
 
 export interface RegisterWebhookRequest {
   url: string;
@@ -260,11 +318,35 @@ export interface ListDeliveriesResponse {
   deliveries: WebhookDeliveryResponse[];
 }
 
+export type WebhookSigningSecretStatus = 'active' | 'overlapping' | 'retired';
+
+export interface WebhookSigningSecretMetadata {
+  key_id: string;
+  created_at: string;
+  activated_at: string;
+  retired_at?: string | null;
+  status: WebhookSigningSecretStatus;
+}
+
+export interface ListWebhookSigningSecretsResponse {
+  secrets: WebhookSigningSecretMetadata[];
+}
+
+export interface RotateWebhookSigningSecretRequest {
+  overlap_window_seconds?: number;
+}
+
+export interface RotateWebhookSigningSecretResponse extends WebhookSigningSecretMetadata {
+  secret: string;
+  overlap_window_seconds: number;
+}
+
 // ── Schedule ────────────────────────────────────────────────────────────────
 
-export type ScheduleFrequency = "daily" | "weekly" | "monthly";
+export type ScheduleFrequency = 'daily' | 'weekly' | 'monthly';
 
-export type ScheduleStatus = "active" | "paused" | "cancelled" | "completed";
+export type ScheduleStatus =
+  'active' | 'processing' | 'failed' | 'paused' | 'cancelled' | 'completed';
 
 export interface CreateScheduleRequest {
   from_wallet_id: string;
@@ -274,13 +356,17 @@ export interface CreateScheduleRequest {
   frequency: ScheduleFrequency;
   start_date: string;
   end_date?: string;
+  timezone?: string;
+  missed_run_policy?: 'skip' | 'run_once';
 }
 
 export interface UpdateScheduleRequest {
-  status?: "active" | "paused";
+  status?: 'active' | 'paused';
   amount?: string;
   frequency?: ScheduleFrequency;
   end_date?: string;
+  timezone?: string;
+  missed_run_policy?: 'skip' | 'run_once';
 }
 
 export interface ScheduleResponse {
@@ -290,10 +376,31 @@ export interface ScheduleResponse {
   asset: string;
   amount: string;
   frequency: ScheduleFrequency;
+  timezone: string;
+  missed_run_policy: 'skip' | 'run_once';
   next_run_at: string;
   end_at?: string;
   status: ScheduleStatus;
   created_at: string;
+}
+
+export type ScheduleRunStatus =
+  'pending' | 'running' | 'succeeded' | 'failed' | 'skipped' | 'cancelled';
+
+export interface ScheduleRunResponse {
+  id: string;
+  schedule_id: string;
+  expected_run_at: string;
+  status: ScheduleRunStatus;
+  transaction_id?: string;
+  error?: string;
+  started_at?: string;
+  completed_at?: string;
+  created_at: string;
+}
+
+export interface ListScheduleRunsResponse {
+  runs: ScheduleRunResponse[];
 }
 
 export interface ListSchedulesResponse {
@@ -302,15 +409,49 @@ export interface ListSchedulesResponse {
 
 // ── API Key ─────────────────────────────────────────────────────────────────
 
+/** A resource an API key scope can cover. */
+export type APIKeyScopeResource =
+  | 'wallets'
+  | 'transfers'
+  | 'batches'
+  | 'webhooks'
+  | 'reports'
+  | 'keys'
+  | 'audit'
+  | 'fiat'
+  | 'fx'
+  | 'fees'
+  | 'beneficiaries'
+  | 'compliance';
+
+/**
+ * A permission an API key can hold: `<resource>:read`, `<resource>:write`,
+ * `<resource>:*`, or `*` for everything. Reads (GET) need `read`; anything
+ * that changes state needs `write`. A key with no scopes has full access.
+ */
+export type APIKeyScope = `${APIKeyScopeResource}:${'read' | 'write' | '*'}` | '*' | 'admin';
+
 export interface CreateKeyRequest {
   label?: string;
+  /**
+   * Scopes to grant. Omit (or pass `[]`) for a full-access key. A scoped key
+   * can only create keys with scopes it holds itself.
+   */
+  scopes?: APIKeyScope[];
+  role?: 'owner' | 'admin' | 'developer' | 'viewer';
+  mode?: 'live' | 'test';
+  expires_at?: string;
+  rotation_reminder_days?: number;
 }
 
 export interface CreateKeyResponse {
   id: string;
+  /** The raw key. Returned only once, in this response. */
   key: string;
   prefix: string;
   label?: string;
+  /** Granted scopes; an empty list means full access. */
+  scopes: APIKeyScope[];
   created_at: string;
 }
 
@@ -318,6 +459,8 @@ export interface APIKeyResponse {
   id: string;
   prefix: string;
   label?: string;
+  /** Granted scopes; an empty list means full access. The secret is never listed. */
+  scopes: APIKeyScope[];
   last_used_at?: string;
   revoked_at?: string;
   created_at: string;

@@ -7,20 +7,10 @@ import (
 // EventType is a string type for webhook event type constants.
 type EventType string
 
-type DeliveryStatus string
-
 const (
-	EventTypePaymentCompleted    = "payment.completed"
-	EventTypePaymentFailed       = "payment.failed"
-	EventTypeFxQuoteCreated      = "fx.quote.created"
-	EventTypeSettlementCompleted = "settlement.completed"
-	EventTypeBatchCompleted      = "batch.completed"
-
-	EventTransferInitiated      = "transfer.initiated"
 	EventTransferSettled        = "transfer.settled"
 	EventTransferFailed         = "transfer.failed"
 	EventWalletFunded           = "wallet.funded"
-	EventConversionCompleted    = "conversion.completed"
 	EventTreasurySweepCompleted = "treasury.sweep_completed"
 	EventReconciliationDrift    = "reconciliation.drift"
 
@@ -34,17 +24,35 @@ const (
 	EventClaimableBalanceExpired = "claimable_balance.expired"
 	EventClaimableBalanceRevoked = "claimable_balance.revoked"
 
-	DeliveryStatusPending   = "pending"
-	DeliveryStatusDelivered = "delivered"
-	DeliveryStatusFailed    = "failed"
+	EventAPIKeyRotationReminder = "api_key.rotation_reminder"
+	EventAPIKeyExpired          = "api_key.expired"
 )
 
 var SupportedEventTypes = []string{
-	EventTypePaymentCompleted,
-	EventTypePaymentFailed,
-	EventTypeFxQuoteCreated,
-	EventTypeSettlementCompleted,
-	EventTypeBatchCompleted,
+	EventTransferSettled,
+	EventTransferFailed,
+	EventWalletFunded,
+	EventTreasurySweepCompleted,
+	EventReconciliationDrift,
+	EventTransferComplianceHold,
+	EventTransferComplianceApproved,
+	EventTransferComplianceRejected,
+	EventSanctionsRefreshFailed,
+	EventClaimableBalanceCreated,
+	EventClaimableBalanceClaimed,
+	EventClaimableBalanceExpired,
+	EventClaimableBalanceRevoked,
+	EventAPIKeyRotationReminder,
+	EventAPIKeyExpired,
+}
+
+func IsSupportedEventType(eventType string) bool {
+	for _, supported := range SupportedEventTypes {
+		if eventType == supported {
+			return true
+		}
+	}
+	return false
 }
 
 type WebhookEndpoint struct {
@@ -53,6 +61,7 @@ type WebhookEndpoint struct {
 	URL             string     `json:"url"`
 	Secret          string     `json:"secret,omitempty"`
 	Events          []string   `json:"events"`
+	Mode            Mode       `json:"mode"`
 	Active          bool       `json:"active"`
 	SuccessCount    int        `json:"success_count"`
 	FailureCount    int        `json:"failure_count"`
@@ -66,6 +75,7 @@ type WebhookSubscription struct {
 	ID         string    `json:"id"`
 	TenantID   *string   `json:"tenant_id,omitempty"`
 	EventType  string    `json:"event_type"`
+	Mode       Mode      `json:"mode"`
 	WebhookURL string    `json:"webhook_url"`
 	CreatedAt  time.Time `json:"created_at"`
 }
@@ -74,6 +84,7 @@ type WebhookDelivery struct {
 	ID            string     `json:"id"`
 	EndpointID    string     `json:"endpoint_id"`
 	TenantID      *string    `json:"tenant_id,omitempty"`
+	Mode          Mode       `json:"mode"`
 	EventType     string     `json:"event_type"`
 	Method        string     `json:"method"`
 	Payload       string     `json:"payload"`
@@ -93,6 +104,7 @@ type WebhookDeadLetter struct {
 	ID           string    `json:"id"`
 	EndpointID   string    `json:"endpoint_id"`
 	TenantID     *string   `json:"tenant_id,omitempty"`
+	Mode         Mode      `json:"mode"`
 	DeliveryID   string    `json:"delivery_id"`
 	Payload      string    `json:"payload"`
 	ErrorMessage string    `json:"error_message"`
@@ -114,6 +126,7 @@ type TenantWebhookConfig struct {
 	Enabled          bool
 	URL              string
 	Secret           string
+	SigningKeyID     string
 	SigningAlgorithm string
 	Events           []string
 	Paused           bool
@@ -127,7 +140,6 @@ type TenantWebhookConfig struct {
 	SecretConfigured bool
 }
 
-// DeliveryStatus is the lifecycle state of a tenant webhook delivery attempt.
 type DeliveryStatus string
 
 const (
@@ -138,16 +150,25 @@ const (
 )
 
 type TenantWebhookDelivery struct {
-	ID           string
-	TenantID     string
-	EventType    EventType
-	Payload      []byte
-	Status       DeliveryStatus
-	ResponseCode *int
-	AttemptCount int
-	LastAttempt  *time.Time
-	CreatedAt    time.Time
-	UpdatedAt    time.Time
+	ID           string         `json:"id"`
+	TenantID     string         `json:"tenant_id"`
+	SigningKeyID string         `json:"signing_key_id,omitempty"`
+	EventType    EventType      `json:"event_type"`
+	Payload      []byte         `json:"payload"`
+	Status       DeliveryStatus `json:"status"`
+	ResponseCode *int           `json:"response_code,omitempty"`
+	AttemptCount int            `json:"attempt_count"`
+	LastAttempt  *time.Time     `json:"last_attempt,omitempty"`
+	CreatedAt    time.Time      `json:"created_at"`
+	UpdatedAt    time.Time      `json:"updated_at"`
+}
+
+type WebhookSigningSecret struct {
+	KeyID       string     `json:"key_id"`
+	CreatedAt   time.Time  `json:"created_at"`
+	ActivatedAt time.Time  `json:"activated_at"`
+	RetiredAt   *time.Time `json:"retired_at,omitempty"`
+	Status      string     `json:"status"`
 }
 
 // WebhookConfigUpdate is a partial update: every field is a pointer so callers
@@ -155,12 +176,12 @@ type TenantWebhookDelivery struct {
 // *[]string for the same reason — an explicit empty list clears subscriptions,
 // while omitting it leaves the current list untouched.
 type WebhookConfigUpdate struct {
-	Enabled      *bool
-	URL          *string
-	Events       *[]string
-	Paused       *bool
-	ResumeAt     *time.Time
-	RotateSecret bool
+	Enabled      *bool      `json:"enabled,omitempty"`
+	URL          *string    `json:"url,omitempty"`
+	Events       *[]string  `json:"events,omitempty"`
+	Paused       *bool      `json:"paused,omitempty"`
+	ResumeAt     *time.Time `json:"resume_at,omitempty"`
+	RotateSecret bool       `json:"rotate_secret,omitempty"`
 }
 
 type WebhookConfigResult struct {

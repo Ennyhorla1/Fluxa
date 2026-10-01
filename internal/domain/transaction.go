@@ -22,30 +22,46 @@ const (
 	// must reset it to StatusPending first, because settlement.Engine
 	// silently no-ops on any status other than pending.
 	StatusComplianceHold TransactionStatus = "compliance_hold"
+	StatusApprovalPending TransactionStatus = "approval_pending"
+	StatusCancelled      TransactionStatus = "cancelled"
 
 	TypeTransfer   TransactionType = "transfer"
 	TypeConversion TransactionType = "conversion"
 	TypeFunding    TransactionType = "funding"
 )
 
+type TransactionFilter struct {
+	WalletID          string
+	ExternalReference string
+	Tag               string
+	Limit             int
+	Offset            int
+}
+
 type Transaction struct {
-	ID             string
-	TxHash         string
-	Type           TransactionType
-	Status         TransactionStatus
-	FromWallet     string
-	ToWallet       string
-	Asset          string
-	Amount         decimal.Decimal
-	Fee            decimal.Decimal
-	FeeBps         int
-	TenantID       *string
-	BatchID        *string
-	Reference      string
-	CreatedAt      time.Time
-	ReconciledAt   *time.Time
-	RequeueCount   int
-	IdempotencyKey string
+	ID                  string
+	TxHash              string
+	Type                TransactionType
+	Status              TransactionStatus
+	FromWallet          string
+	ToWallet            string
+	Asset               string
+	Amount              decimal.Decimal
+	Fee                 decimal.Decimal
+	FeeBps              int
+	TenantID            *string
+	Mode                Mode
+	BatchID             *string
+	Reference           string
+	ExternalReference   *string
+	Tags                []string
+	FailureReason       string
+	FailureMessage      string
+	CreatedAt           time.Time
+	ReconciledAt        *time.Time
+	RequeueCount        int
+	IdempotencyKey      string
+	IdempotencyRecordID *string
 
 	// Fiat leg metadata, set only for transfers that settle a deposit or
 	// withdrawal through a fiat rail. All nullable — a pure on-chain

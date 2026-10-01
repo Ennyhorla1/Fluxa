@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -18,10 +19,13 @@ import (
 	"github.com/fluxa/fluxa/internal/org"
 	"github.com/fluxa/fluxa/internal/reconcile"
 	"github.com/fluxa/fluxa/internal/schedule"
+	"github.com/fluxa/fluxa/internal/status"
+	"github.com/fluxa/fluxa/internal/tenant"
 	"github.com/fluxa/fluxa/internal/transfer"
 	"github.com/fluxa/fluxa/internal/treasury"
 	"github.com/fluxa/fluxa/internal/wallet"
 	"github.com/fluxa/fluxa/internal/webhook"
+	"github.com/go-chi/chi/v5"
 )
 
 var authzJWTSecret = []byte("test-secret-authz")
@@ -62,10 +66,14 @@ func (nilValidator) GetMember(_ context.Context, _, _ string) (*domain.OrgMember
 // Helpers
 // ---------------------------------------------------------------------------
 
-func newAuthzTestServerWithValidator(t *testing.T, validator MembershipValidator) *Server {
+func newAuthzTestServerWithValidator(t *testing.T, validator MembershipValidator, statusHandlers ...*status.Handler) *Server {
 	t.Helper()
 
 	treasuryHandler := treasury.NewHandler(nil).WithMutationGate(RequireRole(domain.RoleOwner, domain.RoleAdmin))
+	var statusHandler *status.Handler
+	if len(statusHandlers) > 0 {
+		statusHandler = statusHandlers[0]
+	}
 
 	return New(
 		auth.NewHandler(nil),
@@ -84,8 +92,11 @@ func newAuthzTestServerWithValidator(t *testing.T, validator MembershipValidator
 		batch.NewHandler(nil),
 		schedule.NewHandler(nil),
 		treasuryHandler,
-		nil,
-		nil,
+		nil, // claimableHandler
+		statusHandler,
+		nil, // complianceHandler
+		nil, // auditHandler
+		nil, // usageHandler
 		authzJWTSecret,
 		"0",
 		nil,
@@ -124,6 +135,35 @@ func doRequestWithToken(t *testing.T, srv *Server, method, path, token string) i
 func doRequest(t *testing.T, srv *Server, method, path, role string) int {
 	t.Helper()
 	return doRequestWithToken(t, srv, method, path, mustToken(t, role))
+}
+
+func TestScheduleRoutesRequireTransferReadAndWriteScopes(t *testing.T) {
+	router := chi.NewRouter()
+	h := schedule.NewHandler(nil)
+	router.Route("/v1/schedules", h.Routes(
+		RequireScope(domain.ScopeTransfersRead),
+		RequireScope(domain.ScopeTransfersWrite),
+	))
+
+	for _, tc := range []struct {
+		name   string
+		method string
+		path   string
+		scopes []string
+	}{
+		{name: "read requires transfers:read", method: http.MethodGet, path: "/v1/schedules/", scopes: []string{domain.ScopeTransfersWrite}},
+		{name: "create requires transfers:write", method: http.MethodPost, path: "/v1/schedules/", scopes: []string{domain.ScopeTransfersRead}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(tc.method, tc.path, nil)
+			req = req.WithContext(tenant.WithScopes(req.Context(), tc.scopes))
+			w := httptest.NewRecorder()
+			router.ServeHTTP(w, req)
+			if w.Code != http.StatusForbidden {
+				t.Fatalf("status = %d, want 403", w.Code)
+			}
+		})
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -226,6 +266,104 @@ func TestRemovedMemberReturns403(t *testing.T) {
 	}
 }
 
+func TestV1MiddlewareErrorIncludesRequestID(t *testing.T) {
+	srv := newAuthzTestServerWithValidator(t, nil)
+	req := httptest.NewRequest(http.MethodGet, "/v1/keys/", nil)
+	req.Header.Set("X-Request-ID", "req-middleware-test")
+	rec := httptest.NewRecorder()
+	srv.router.ServeHTTP(rec, req)
+
+	var body struct {
+		Error struct {
+			Code      string `json:"code"`
+			Message   string `json:"message"`
+			Status    int    `json:"status"`
+			RequestID string `json:"request_id"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode middleware error: %v", err)
+	}
+	if rec.Code != http.StatusUnauthorized || body.Error.Status != rec.Code {
+		t.Fatalf("status mismatch: HTTP %d, body %d", rec.Code, body.Error.Status)
+	}
+	if body.Error.Code != "UNAUTHORIZED" || body.Error.RequestID != "req-middleware-test" {
+		t.Fatalf("unexpected middleware error: %+v", body.Error)
+	}
+	if rec.Header().Get("X-Request-ID") != body.Error.RequestID {
+		t.Fatalf("request ID header mismatch: %q", rec.Header().Get("X-Request-ID"))
+	}
+}
+
+func TestV1RoleMiddlewareErrorIncludesRequestID(t *testing.T) {
+	validator := newMockMembershipValidator(
+		&domain.OrgMember{TenantID: "tenant-1", UserID: "user-1", Role: domain.RoleDeveloper},
+	)
+	srv := newAuthzTestServerWithValidator(t, validator)
+	req := httptest.NewRequest(http.MethodGet, "/v1/admin/fees/collected", nil)
+	req.Header.Set("Authorization", "Bearer "+mustToken(t, domain.RoleDeveloper))
+	req.Header.Set("X-Request-ID", "req-role-test")
+	rec := httptest.NewRecorder()
+	srv.router.ServeHTTP(rec, req)
+
+	var body struct {
+		Error struct {
+			Code      string `json:"code"`
+			Status    int    `json:"status"`
+			RequestID string `json:"request_id"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode role middleware error: %v", err)
+	}
+	if rec.Code != http.StatusForbidden || body.Error.Status != rec.Code || body.Error.Code != "FORBIDDEN" {
+		t.Fatalf("unexpected role middleware error: HTTP %d, body %+v", rec.Code, body.Error)
+	}
+	if body.Error.RequestID != "req-role-test" || rec.Header().Get("X-Request-ID") != body.Error.RequestID {
+		t.Fatalf("request ID mismatch: body=%q header=%q", body.Error.RequestID, rec.Header().Get("X-Request-ID"))
+	}
+}
+
+func TestV1RouterErrorsUseStructuredEnvelope(t *testing.T) {
+	tests := []struct {
+		name       string
+		method     string
+		path       string
+		wantStatus int
+		wantCode   string
+	}{
+		{"not found", http.MethodGet, "/v1/not-a-route", http.StatusNotFound, "NOT_FOUND"},
+		{"method not allowed", http.MethodPut, "/v1/auth/login", http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := newAuthzTestServerWithValidator(t, nil)
+			req := httptest.NewRequest(tc.method, tc.path, nil)
+			req.Header.Set("X-Request-ID", "req-router-test")
+			rec := httptest.NewRecorder()
+			srv.router.ServeHTTP(rec, req)
+
+			var body struct {
+				Error struct {
+					Code      string `json:"code"`
+					Message   string `json:"message"`
+					Status    int    `json:"status"`
+					RequestID string `json:"request_id"`
+				} `json:"error"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+				t.Fatalf("decode router error: %v", err)
+			}
+			if rec.Code != tc.wantStatus || body.Error.Status != tc.wantStatus || body.Error.Code != tc.wantCode {
+				t.Fatalf("unexpected router error: HTTP %d, body %+v", rec.Code, body.Error)
+			}
+			if body.Error.RequestID != "req-router-test" || rec.Header().Get("X-Request-ID") != body.Error.RequestID {
+				t.Fatalf("request ID mismatch: body=%q header=%q", body.Error.RequestID, rec.Header().Get("X-Request-ID"))
+			}
+		})
+	}
+}
+
 // TestDemotedMemberUsesCurrentRole verifies that a user who was demoted from
 // admin to developer via DB gets the downgraded role on the request, and is
 // then rejected by RequireRole for admin-only routes.
@@ -297,5 +435,18 @@ func TestRoleMismatchUsesDBRole(t *testing.T) {
 	code := doRequest(t, srv, http.MethodGet, "/v1/admin/fees/collected", domain.RoleOwner)
 	if code != http.StatusForbidden {
 		t.Fatalf("role mismatch (JWT=owner, DB=viewer): expected 403, got %d", code)
+	}
+}
+
+func TestWebhookSigningSecretRotationRequiresOwnerOrAdmin(t *testing.T) {
+	for _, role := range []string{domain.RoleViewer, domain.RoleDeveloper} {
+		validator := newMockMembershipValidator(
+			&domain.OrgMember{TenantID: "tenant-1", UserID: "user-1", Role: role},
+		)
+		srv := newAuthzTestServerWithValidator(t, validator)
+		code := doRequest(t, srv, http.MethodPost, "/v1/webhooks/secret/rotate", role)
+		if code != http.StatusForbidden {
+			t.Fatalf("role %q on webhook secret rotation: expected 403, got %d", role, code)
+		}
 	}
 }

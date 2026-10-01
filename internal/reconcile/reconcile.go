@@ -18,7 +18,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
 	"github.com/shopspring/decimal"
-	horizonclient "github.com/stellar/go/clients/horizonclient"
 	"github.com/stellar/go/protocols/horizon"
 	"github.com/stellar/go/protocols/horizon/operations"
 )
@@ -28,45 +27,8 @@ const (
 	pendingCheckThreshold = 2 * time.Minute
 	stuckThreshold        = 10 * time.Minute
 	maxRequeues           = 3
+	pageSize              = 100
 )
-
-type AuditOutcome string
-
-const (
-	AuditOK       AuditOutcome = "ok"
-	AuditMismatch AuditOutcome = "mismatch"
-	AuditNotFound AuditOutcome = "not_found"
-)
-
-type AuditLogEntry struct {
-	ID             string
-	TxID           string
-	StellarHash    string
-	CheckedAt      time.Time
-	HorizonStatus  string
-	AmountVerified bool
-	AssetVerified  bool
-	FeeVerified    bool
-	Outcome        AuditOutcome
-	Details        string
-}
-
-type DailySummaryRow struct {
-	Date          string `json:"date"`
-	OKCount       int    `json:"ok"`
-	MismatchCount int    `json:"mismatch"`
-	NotFoundCount int    `json:"not_found"`
-}
-
-// ReconciliationRun records the outcome of a single reconciliation pass.
-type ReconciliationRun struct {
-	ID                 string
-	StartedAt          time.Time
-	CompletedAt        time.Time
-	TxsChecked         int
-	DiscrepanciesFound int
-	CorrectionsMade    int
-}
 
 // BalanceDiscrepancy records a wallet whose DB balance diverges from Horizon.
 type BalanceDiscrepancy struct {
@@ -95,6 +57,9 @@ type DriftSnapshot struct {
 // Repository is implemented by postgres.TransactionRepo and covers confirmed-tx
 // auditing, pending-tx reconciliation, and run record writes.
 type Repository interface {
+	// RetryFailedTransaction atomically reopens a failed transfer for a manual
+	// operator retry. Implementations must scope the update by tenant and mode.
+	RetryFailedTransaction(ctx context.Context, id string) error
 	GetConfirmedTxesForReconciliation(ctx context.Context, since time.Duration, limit int) ([]*domain.Transaction, error)
 	GetStuckPendingTxes(ctx context.Context, olderThan time.Duration, limit int) ([]*domain.Transaction, error)
 	// ResetStuckSubmittedToPending recovers a transaction claimed
@@ -110,10 +75,10 @@ type Repository interface {
 	UpdateTxFailed(ctx context.Context, id string) error
 	IncrementRequeueCount(ctx context.Context, id string) (int, error)
 	UpdateReconciledAt(ctx context.Context, id string) error
-	WriteAuditLog(ctx context.Context, entry *AuditLogEntry) error
-	GetDailyReconciliationSummary(ctx context.Context, days int) ([]DailySummaryRow, error)
+	WriteAuditLog(ctx context.Context, entry *domain.AuditLogEntry) error
+	GetDailyReconciliationSummary(ctx context.Context, days int) ([]domain.DailySummaryRow, error)
 	GetPendingStuckCount(ctx context.Context, olderThan time.Duration) (int, error)
-	WriteReconciliationRun(ctx context.Context, run *ReconciliationRun) error
+	WriteReconciliationRun(ctx context.Context, run *domain.ReconciliationRun) error
 }
 
 // WalletRepository is implemented by postgres.ReconcileRepo and covers balance
@@ -127,6 +92,17 @@ type WalletRepository interface {
 type DriftRepository interface {
 	WriteDriftSnapshot(ctx context.Context, snapshot *DriftSnapshot) error
 	ListCurrentDrift(ctx context.Context) ([]*DriftSnapshot, error)
+}
+
+type DiscrepancyWorkflowRepository interface {
+	ListReconciliationDiscrepancies(context.Context, string, string, string, int, int) ([]*domain.ReconciliationDiscrepancy, int, error)
+	UpdateReconciliationDiscrepancy(context.Context, string, string, string, string, string) (*domain.ReconciliationDiscrepancy, error)
+	ReconciliationDiscrepancySummary(context.Context, string) (*domain.ReconciliationDiscrepancySummary, error)
+}
+
+type taskQueue interface {
+	EnqueueTransfer(context.Context, string) error
+	Enqueue(context.Context, string, interface{}) error
 }
 
 // WalletLookup resolves a wallet ID to its Stellar public key. Implemented by
@@ -144,7 +120,7 @@ type Service struct {
 	walletLookup      WalletLookup
 	stellar           stellar.Client
 	alerting          *alerting.Client
-	queue             *queue.Client
+	queue             taskQueue
 	webhookSvc        webhook.Service
 	svcName           string
 	balanceThreshold  decimal.Decimal
@@ -200,6 +176,44 @@ func (s *Service) WithDriftThreshold(threshold decimal.Decimal) *Service {
 	return s
 }
 
+func (s *Service) discrepancyWorkflow() (DiscrepancyWorkflowRepository, error) {
+	repo, ok := s.repo.(DiscrepancyWorkflowRepository)
+	if !ok {
+		return nil, errors.New("reconciliation discrepancy workflow is unavailable")
+	}
+	return repo, nil
+}
+
+func (s *Service) ListDiscrepancies(ctx context.Context, tenantID, status, category string, limit, offset int) ([]*domain.ReconciliationDiscrepancy, int, error) {
+	repo, err := s.discrepancyWorkflow()
+	if err != nil {
+		return nil, 0, err
+	}
+	if limit < 1 || limit > 100 {
+		limit = 50
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	return repo.ListReconciliationDiscrepancies(ctx, tenantID, status, category, limit, offset)
+}
+
+func (s *Service) UpdateDiscrepancy(ctx context.Context, tenantID, id, action, note, assignedTo string) (*domain.ReconciliationDiscrepancy, error) {
+	repo, err := s.discrepancyWorkflow()
+	if err != nil {
+		return nil, err
+	}
+	return repo.UpdateReconciliationDiscrepancy(ctx, tenantID, id, action, note, assignedTo)
+}
+
+func (s *Service) DiscrepancySummary(ctx context.Context, tenantID string) (*domain.ReconciliationDiscrepancySummary, error) {
+	repo, err := s.discrepancyWorkflow()
+	if err != nil {
+		return nil, err
+	}
+	return repo.ReconciliationDiscrepancySummary(ctx, tenantID)
+}
+
 // DefaultDriftThresholdUSD is used when RECONCILIATION_DRIFT_THRESHOLD_USD is
 // unset or unparseable.
 var DefaultDriftThresholdUSD = decimal.RequireFromString("1.00")
@@ -246,7 +260,7 @@ func (s *Service) RunAll(ctx context.Context) error {
 		log.Error().Err(err).Msg("reconcile: pending recovery pass failed")
 	}
 
-	run := &ReconciliationRun{
+	run := &domain.ReconciliationRun{
 		ID:                 uuid.New().String(),
 		StartedAt:          startedAt,
 		CompletedAt:        time.Now().UTC(),
@@ -266,24 +280,33 @@ func (s *Service) RunAll(ctx context.Context) error {
 // locking (SELECT FOR UPDATE SKIP LOCKED) in the repository layer so concurrent
 // reconciler instances process disjoint sets of rows without blocking each other.
 func (s *Service) RunPendingReconciliation(ctx context.Context) (txsChecked, discrepanciesFound, correctionsMade int, err error) {
-	txes, err := s.repo.GetPendingTxesForReconciliation(ctx, pendingCheckThreshold, 100)
-	if err != nil {
-		return 0, 0, 0, fmt.Errorf("fetch pending txes for reconciliation: %w", err)
-	}
-
-	txsChecked = len(txes)
-	log.Info().Int("count", txsChecked).Msg("reconcile: checking pending transactions against Horizon")
-
-	for _, tx := range txes {
-		discrepancy, correction, checkErr := s.checkPendingTransaction(ctx, tx)
-		if checkErr != nil {
-			log.Error().Err(checkErr).Str("tx_id", tx.ID).Msg("reconcile: pending tx check failed")
+	for {
+		txes, fetchErr := s.repo.GetPendingTxesForReconciliation(ctx, pendingCheckThreshold, pageSize)
+		if fetchErr != nil {
+			return txsChecked, discrepanciesFound, correctionsMade, fmt.Errorf("fetch pending txes for reconciliation: %w", fetchErr)
 		}
-		if discrepancy {
-			discrepanciesFound++
+
+		txsChecked += len(txes)
+		if len(txes) == 0 {
+			break
 		}
-		if correction {
-			correctionsMade++
+		log.Info().Int("count", len(txes)).Int("total", txsChecked).Msg("reconcile: checking pending transactions against Horizon")
+
+		for _, tx := range txes {
+			discrepancy, correction, checkErr := s.checkPendingTransaction(ctx, tx)
+			if checkErr != nil {
+				log.Error().Err(checkErr).Str("tx_id", tx.ID).Msg("reconcile: pending tx check failed")
+			}
+			if discrepancy {
+				discrepanciesFound++
+			}
+			if correction {
+				correctionsMade++
+			}
+		}
+
+		if len(txes) < pageSize {
+			break
 		}
 	}
 
@@ -308,8 +331,7 @@ func (s *Service) checkPendingTransaction(ctx context.Context, tx *domain.Transa
 
 	horizonTx, fetchErr := stellar.TransactionDetailWithContext(ctx, s.stellar, tx.TxHash)
 	if fetchErr != nil {
-		hErr, ok := fetchErr.(*horizonclient.Error)
-		if ok && hErr.Problem.Status == 404 {
+		if stellar.IsNotFound(fetchErr) {
 			// Hash exists in DB but Horizon doesn't know about it.
 			if time.Since(tx.CreatedAt) > stuckThreshold {
 				log.Warn().Str("tx_id", tx.ID).Str("tx_hash", tx.TxHash).
@@ -374,21 +396,26 @@ func (s *Service) dispatchWebhook(ctx context.Context, event domain.EventType, t
 // called by the admin force-settle endpoint; the worker-side ForceSettle does
 // the actual re-submission so the HTTP request never blocks on settlement.
 func (s *Service) EnqueueForceSettle(ctx context.Context, transferID, actor string) error {
-	payload := ForceSettlePayload{TransferID: transferID, Actor: actor}
-	if err := s.queue.Enqueue(ctx, queue.TypeForceSettle, payload); err != nil {
-		return fmt.Errorf("enqueue force-settle for transfer %s: %w", transferID, err)
+	if err := s.repo.RetryFailedTransaction(ctx, transferID); err != nil {
+		return fmt.Errorf("retry failed transfer %s: %w", transferID, err)
 	}
-	log.Info().Str("transfer_id", transferID).Str("actor", actor).Msg("reconcile: force-settle enqueued")
+	if err := s.queue.EnqueueTransfer(ctx, transferID); err != nil {
+		return fmt.Errorf("enqueue retried transfer %s: %w", transferID, err)
+	}
+	log.Info().Str("transfer_id", transferID).Str("actor", actor).Msg("reconcile: failed transfer retry enqueued")
 	return nil
 }
 
 // ForceSettle is the worker-side force-settle action: it re-submits the
 // transfer to the settlement worker, bypassing the stuck-pending heuristics.
 func (s *Service) ForceSettle(ctx context.Context, transferID, actor string) error {
-	if err := s.queue.EnqueueTransfer(ctx, transferID); err != nil {
-		return fmt.Errorf("force-settle transfer %s: %w", transferID, err)
+	if err := s.repo.RetryFailedTransaction(ctx, transferID); err != nil {
+		return fmt.Errorf("retry failed transfer %s: %w", transferID, err)
 	}
-	log.Info().Str("transfer_id", transferID).Str("actor", actor).Msg("reconcile: force-settle submitted")
+	if err := s.queue.EnqueueTransfer(ctx, transferID); err != nil {
+		return fmt.Errorf("enqueue retried transfer %s: %w", transferID, err)
+	}
+	log.Info().Str("transfer_id", transferID).Str("actor", actor).Msg("reconcile: failed transfer retry submitted")
 	return nil
 }
 
@@ -419,16 +446,25 @@ func (s *Service) RunWalletReconciliation(ctx context.Context, walletID, actor s
 // Reconcile verifies confirmed transactions against Horizon and flags
 // discrepancies in the ledger audit log.
 func (s *Service) Reconcile(ctx context.Context) error {
-	txes, err := s.repo.GetConfirmedTxesForReconciliation(ctx, reconcileInterval, 100)
-	if err != nil {
-		return fmt.Errorf("fetch txes for reconciliation: %w", err)
-	}
+	for {
+		txes, err := s.repo.GetConfirmedTxesForReconciliation(ctx, reconcileInterval, pageSize)
+		if err != nil {
+			return fmt.Errorf("fetch txes for reconciliation: %w", err)
+		}
 
-	log.Info().Int("count", len(txes)).Msg("reconcile: checking confirmed transactions")
+		if len(txes) == 0 {
+			break
+		}
+		log.Info().Int("count", len(txes)).Msg("reconcile: checking confirmed transactions")
 
-	for _, tx := range txes {
-		if err := s.checkTransaction(ctx, tx); err != nil {
-			log.Error().Err(err).Str("tx_id", tx.ID).Str("tx_hash", tx.TxHash).Msg("reconcile: check failed")
+		for _, tx := range txes {
+			if err := s.checkTransaction(ctx, tx); err != nil {
+				log.Error().Err(err).Str("tx_id", tx.ID).Str("tx_hash", tx.TxHash).Msg("reconcile: check failed")
+			}
+		}
+
+		if len(txes) < pageSize {
+			break
 		}
 	}
 
@@ -440,14 +476,13 @@ func (s *Service) checkTransaction(ctx context.Context, tx *domain.Transaction) 
 
 	horizonTx, err := stellar.TransactionDetailWithContext(ctx, s.stellar, hash)
 	if err != nil {
-		hErr, ok := err.(*horizonclient.Error)
-		if ok && hErr.Problem.Status == 404 {
+		if stellar.IsNotFound(err) {
 			log.Error().Str("tx_id", tx.ID).Str("tx_hash", hash).Msg("reconcile: confirmed tx not found on horizon")
 			if repoErr := s.repo.UpdateReconciliationStatus(ctx, tx.ID, domain.StatusReconciliationFailed); repoErr != nil {
 				return fmt.Errorf("update status to reconciliation_failed: %w", repoErr)
 			}
 
-			s.writeAudit(ctx, tx, "HTTP 404", false, false, false, AuditNotFound, "transaction not found on Horizon")
+			s.writeAudit(ctx, tx, "HTTP 404", false, false, false, domain.AuditNotFound, "transaction not found on Horizon")
 			s.alerting.Critical(ctx, "Reconciliation Failed: Missing Transaction",
 				fmt.Sprintf("Transaction %s (hash: %s) is marked confirmed in DB but returned 404 on Horizon. Possible ledger loss or fork.", tx.ID, hash))
 			return nil
@@ -461,7 +496,7 @@ func (s *Service) checkTransaction(ctx context.Context, tx *domain.Transaction) 
 			return fmt.Errorf("update status to reconciliation_failed: %w", repoErr)
 		}
 
-		s.writeAudit(ctx, tx, "unsuccessful", false, false, false, AuditNotFound,
+		s.writeAudit(ctx, tx, "unsuccessful", false, false, false, domain.AuditNotFound,
 			fmt.Sprintf("transaction successful=false on Horizon (result: %s)", horizonTx.ResultXdr))
 		s.alerting.Critical(ctx, "Reconciliation Failed: Unsuccessful Transaction",
 			fmt.Sprintf("Transaction %s (hash: %s) is marked confirmed in DB but Horizon reports it as unsuccessful.", tx.ID, hash))
@@ -489,13 +524,13 @@ func (s *Service) checkTransaction(ctx context.Context, tx *domain.Transaction) 
 			return fmt.Errorf("update status to reconciliation_failed: %w", repoErr)
 		}
 
-		s.writeAudit(ctx, tx, horizonStatus(&horizonTx), amountVerified, assetVerified, feeVerified, AuditMismatch, details)
+		s.writeAudit(ctx, tx, horizonStatus(&horizonTx), amountVerified, assetVerified, feeVerified, domain.AuditMismatch, details)
 		s.alerting.Critical(ctx, "Reconciliation Failed: Payment Mismatch",
 			fmt.Sprintf("Transaction %s (hash: %s): %s", tx.ID, hash, details))
 		return nil
 	}
 
-	s.writeAudit(ctx, tx, horizonStatus(&horizonTx), true, true, true, AuditOK, "all checks passed")
+	s.writeAudit(ctx, tx, horizonStatus(&horizonTx), true, true, true, domain.AuditOK, "all checks passed")
 	if err := s.repo.UpdateReconciledAt(ctx, tx.ID); err != nil {
 		log.Error().Err(err).Str("tx_id", tx.ID).Msg("reconcile: update reconciled_at")
 	}
@@ -696,66 +731,75 @@ func verifyOps(ops []operations.Operation, expected expectedPayment) (amountVeri
 // RecoverPending re-enqueues stuck pending transactions (regardless of whether
 // they have a Stellar hash) up to maxRequeues times before marking them failed.
 func (s *Service) RecoverPending(ctx context.Context) error {
-	txes, err := s.repo.GetStuckPendingTxes(ctx, stuckThreshold, 100)
-	if err != nil {
-		return fmt.Errorf("fetch stuck pending txes: %w", err)
-	}
-
-	log.Info().Int("count", len(txes)).Msg("reconcile: recovering stuck pending transactions")
-
-	for _, tx := range txes {
-		// Defence in depth, and checked first so no later branch can act on a
-		// held transfer. GetStuckPendingTxes selects pending rows and
-		// submitted-without-hash rows, so a compliance_hold row should never
-		// appear here — but such a transfer is waiting on a human, not stuck,
-		// and re-enqueuing one would release a payment compliance
-		// deliberately stopped. Re-asserting the invariant here keeps it
-		// testable and means a future widening of that query cannot quietly
-		// become a compliance bypass.
-		if tx.Status == domain.StatusComplianceHold {
-			log.Warn().Str("tx_id", tx.ID).
-				Msg("reconcile: skipping transaction held for compliance review")
-			continue
+	for {
+		txes, err := s.repo.GetStuckPendingTxes(ctx, stuckThreshold, pageSize)
+		if err != nil {
+			return fmt.Errorf("fetch stuck pending txes: %w", err)
 		}
 
-		if tx.Status == domain.StatusSubmitted {
-			// This row was claimed by a worker that crashed before it could
-			// record a tx_hash — nothing may have reached the network. Reset
-			// it to pending so ClaimForSubmission (deliberately strict:
-			// pending-only) will accept a fresh attempt.
-			if err := s.repo.ResetStuckSubmittedToPending(ctx, tx.ID, stuckThreshold); err != nil {
-				if errors.Is(err, domain.ErrConcurrentUpdate) {
-					log.Info().Str("tx_id", tx.ID).
-						Msg("reconcile: stuck submitted tx no longer eligible for reset (already progressed)")
-				} else {
-					log.Error().Err(err).Str("tx_id", tx.ID).Msg("reconcile: reset stuck submitted tx to pending")
-				}
+		if len(txes) == 0 {
+			break
+		}
+		log.Info().Int("count", len(txes)).Msg("reconcile: recovering stuck pending transactions")
+
+		for _, tx := range txes {
+			// Defence in depth, and checked first so no later branch can act on a
+			// held transfer. GetStuckPendingTxes selects pending rows and
+			// submitted-without-hash rows, so a compliance_hold row should never
+			// appear here — but such a transfer is waiting on a human, not stuck,
+			// and re-enqueuing one would release a payment compliance
+			// deliberately stopped. Re-asserting the invariant here keeps it
+			// testable and means a future widening of that query cannot quietly
+			// become a compliance bypass.
+			if tx.Status == domain.StatusComplianceHold {
+				log.Warn().Str("tx_id", tx.ID).
+					Msg("reconcile: skipping transaction held for compliance review")
 				continue
 			}
-		}
 
-		newCount, err := s.repo.IncrementRequeueCount(ctx, tx.ID)
-		if err != nil {
-			log.Error().Err(err).Str("tx_id", tx.ID).Msg("reconcile: increment requeue count")
-			continue
-		}
-
-		if newCount > maxRequeues {
-			log.Warn().Str("tx_id", tx.ID).Int("requeue_count", newCount).Msg("reconcile: max requeues reached, marking failed")
-			if repoErr := s.repo.UpdateReconciliationStatus(ctx, tx.ID, domain.StatusFailed); repoErr != nil {
-				log.Error().Err(repoErr).Str("tx_id", tx.ID).Msg("reconcile: mark as failed")
+			if tx.Status == domain.StatusSubmitted {
+				// This row was claimed by a worker that crashed before it could
+				// record a tx_hash — nothing may have reached the network. Reset
+				// it to pending so ClaimForSubmission (deliberately strict:
+				// pending-only) will accept a fresh attempt.
+				if err := s.repo.ResetStuckSubmittedToPending(ctx, tx.ID, stuckThreshold); err != nil {
+					if errors.Is(err, domain.ErrConcurrentUpdate) {
+						log.Info().Str("tx_id", tx.ID).
+							Msg("reconcile: stuck submitted tx no longer eligible for reset (already progressed)")
+					} else {
+						log.Error().Err(err).Str("tx_id", tx.ID).Msg("reconcile: reset stuck submitted tx to pending")
+					}
+					continue
+				}
 			}
-			s.alerting.Critical(ctx, "Transaction Failed: Max Requeues",
-				fmt.Sprintf("Transaction %s has been re-enqueued %d times without success. Marked as failed.", tx.ID, newCount))
-			continue
+
+			newCount, err := s.repo.IncrementRequeueCount(ctx, tx.ID)
+			if err != nil {
+				log.Error().Err(err).Str("tx_id", tx.ID).Msg("reconcile: increment requeue count")
+				continue
+			}
+
+			if newCount > maxRequeues {
+				log.Warn().Str("tx_id", tx.ID).Int("requeue_count", newCount).Msg("reconcile: max requeues reached, marking failed")
+				if repoErr := s.repo.UpdateReconciliationStatus(ctx, tx.ID, domain.StatusFailed); repoErr != nil {
+					log.Error().Err(repoErr).Str("tx_id", tx.ID).Msg("reconcile: mark as failed")
+				}
+				s.alerting.Critical(ctx, "Transaction Failed: Max Requeues",
+					fmt.Sprintf("Transaction %s has been re-enqueued %d times without success. Marked as failed.", tx.ID, newCount))
+				continue
+			}
+
+			if err := s.queue.EnqueueTransfer(ctx, tx.ID); err != nil {
+				log.Error().Err(err).Str("tx_id", tx.ID).Msg("reconcile: re-enqueue transfer failed")
+				continue
+			}
+
+			log.Info().Str("tx_id", tx.ID).Int("requeue_count", newCount).Msg("reconcile: re-enqueued pending transaction")
 		}
 
-		if err := s.queue.EnqueueTransfer(ctx, tx.ID); err != nil {
-			log.Error().Err(err).Str("tx_id", tx.ID).Msg("reconcile: re-enqueue transfer failed")
-			continue
+		if len(txes) < pageSize {
+			break
 		}
-
-		log.Info().Str("tx_id", tx.ID).Int("requeue_count", newCount).Msg("reconcile: re-enqueued pending transaction")
 	}
 
 	return nil
@@ -789,8 +833,7 @@ func (s *Service) RunBalanceReconciliation(ctx context.Context) error {
 func (s *Service) checkWalletBalance(ctx context.Context, w *domain.Wallet) error {
 	acct, err := stellar.LoadAccountWithContext(ctx, s.stellar, w.PublicKey)
 	if err != nil {
-		hErr, ok := err.(*horizonclient.Error)
-		if ok && hErr.Problem.Status == 404 {
+		if stellar.IsNotFound(err) {
 			return nil
 		}
 		return fmt.Errorf("load Horizon account %s: %w", w.PublicKey, err)
@@ -971,15 +1014,15 @@ func (s *Service) GetSummary(ctx context.Context, days int) (*SummaryResponse, e
 }
 
 type SummaryResponse struct {
-	Days          []DailySummaryRow `json:"days"`
-	TotalOK       int               `json:"total_ok"`
-	TotalMismatch int               `json:"total_mismatch"`
-	TotalNotFound int               `json:"total_not_found"`
-	PendingStuck  int               `json:"pending_stuck"`
+	Days          []domain.DailySummaryRow `json:"days"`
+	TotalOK       int                      `json:"total_ok"`
+	TotalMismatch int                      `json:"total_mismatch"`
+	TotalNotFound int                      `json:"total_not_found"`
+	PendingStuck  int                      `json:"pending_stuck"`
 }
 
-func (s *Service) writeAudit(ctx context.Context, tx *domain.Transaction, horizonStatus string, amountOK, assetOK, feeOK bool, outcome AuditOutcome, details string) {
-	entry := &AuditLogEntry{
+func (s *Service) writeAudit(ctx context.Context, tx *domain.Transaction, horizonStatus string, amountOK, assetOK, feeOK bool, outcome domain.AuditOutcome, details string) {
+	entry := &domain.AuditLogEntry{
 		ID:             uuid.New().String(),
 		TxID:           tx.ID,
 		StellarHash:    tx.TxHash,

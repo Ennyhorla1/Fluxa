@@ -1,4 +1,4 @@
-.PHONY: run-api run-worker migrate migrate-down test lint build tidy generate openapi-check openapi-manifest deploy-primary deploy-secondary failover
+.PHONY: run-api run-worker migrate migrate-down test lint fmt-check format-check typecheck build tidy generate openapi-check openapi-manifest clean deploy-primary deploy-secondary failover
 
 # Run the API server
 run-api:
@@ -32,6 +32,17 @@ test-cover:
 lint:
 	golangci-lint run ./...
 
+# Check Go source formatting. gofmt parses before it formats, so a file that
+# lost a brace or gained a stray declaration during a merge fails here first,
+# before vet or a full build has to run.
+fmt-check:
+	@unformatted="$$(gofmt -l .)"; \
+	if [ -n "$$unformatted" ]; then \
+		echo "The following files are not gofmt-clean:"; \
+		echo "$$unformatted"; \
+		exit 1; \
+	fi
+
 # Build both binaries
 build:
 	go build -o bin/api ./cmd/api
@@ -52,6 +63,19 @@ openapi-check:
 # Regenerate the route manifest from the OpenAPI document
 openapi-manifest:
 	go run ./tools/openapicheck -spec docs/openapi.yaml -manifest docs/api-routes.yaml -write-manifest
+
+typecheck:
+	cd apps/web && npm run typecheck
+	cd sdk && npm run typecheck
+
+format-check:
+	cd apps/web && npm run format:check
+	cd sdk && npm run format:check
+
+clean:
+	cd apps/web && npm run clean
+	cd sdk && npm run clean
+	rm -rf bin
 
 # Multi-region deployment helpers. Override COMPOSE, PRIMARY_ENV, SECONDARY_ENV,
 # PROMOTE_REPLICA_CMD, and UPDATE_DNS_CMD in the deployment environment.
@@ -92,6 +116,7 @@ docker-logs:
 	docker compose logs -f api worker
 
 # CI locally (mimics GitHub Actions)
-ci: lint test openapi-check
-	cd apps/web && npm ci && npm run lint && npm run build
-	cd sdk && npm install && npm run typecheck && npm run build
+ci: fmt-check format-check lint test openapi-check
+	go vet ./...
+	cd apps/web && npm ci && npm run typecheck && npm run lint && npm run format:check && npm run build
+	cd sdk && npm ci --ignore-scripts && npm run typecheck && npm run format:check && npm run test && npm run build
