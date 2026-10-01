@@ -68,6 +68,8 @@ var (
 	ErrSponsorNotCustodied        = errors.New("sponsor account is not a wallet custodied by Fluxa")
 	ErrInvalidAmount              = errors.New("amount must be a positive number")
 	ErrBeneficiaryNotAllowed      = errors.New("destination is not an active beneficiary")
+	ErrWalletBalanceAlertNotFound = errors.New("wallet balance alert not found")
+	ErrDuplicateAlert             = errors.New("wallet balance alert already exists for this wallet and asset")
 )
 
 // Organization membership. Kept in its own block: appending to the var block

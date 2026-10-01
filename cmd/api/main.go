@@ -16,6 +16,7 @@ import (
 	"github.com/fluxa/fluxa/internal/auth"
 	"github.com/fluxa/fluxa/internal/batch"
 	"github.com/fluxa/fluxa/internal/beneficiary"
+	"github.com/fluxa/fluxa/internal/wallet_balance_alert"
 	"github.com/fluxa/fluxa/internal/claimable"
 	"github.com/fluxa/fluxa/internal/compliance"
 	"github.com/fluxa/fluxa/internal/config"
@@ -358,6 +359,7 @@ func main() {
 	usageHandler := server.NewUsageHandler(repoDB)
 	beneficiarySvc := beneficiary.NewService(postgres.NewBeneficiaryRepo(repoDB), auditSvc)
 	transferSvc = transfer.ConfigureBeneficiaryChecker(transferSvc, beneficiarySvc)
+	walletBalanceAlertSvc := wallet_balance_alert.NewService(postgres.NewWalletBalanceAlertRepo(repoDB), auditSvc)
 
 	transferHandler := transfer.NewHandler(transferSvc).WithIdempotency(transferIdemMW)
 	fxHandler := fx.NewHandler(fxSvc).WithIdempotency(idemMW)
@@ -388,6 +390,7 @@ func main() {
 	statusHandler := status.NewHandler(statusSvc)
 	fluxahealth.NewSampler(healthChecks, healthHistoryRepo).Start(ctx)
 	beneficiaryHandler := beneficiary.NewHandler(beneficiarySvc)
+	walletBalanceAlertHandler := wallet_balance_alert.NewHandler(walletBalanceAlertSvc)
 
 	// Claimable balances move real funds in both directions, so the mutating
 	// routes share the Owner/Admin gate used by /v1/keys and the treasury.
@@ -426,6 +429,7 @@ func main() {
 			AccountBurst: cfg.AuthRateLimitAccountBurst,
 		},
 		beneficiaryHandler,
+		walletBalanceAlertHandler,
 		paymentLinkHandler,
 		refundHandler,
 	)
