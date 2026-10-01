@@ -333,7 +333,7 @@ func TestV1RouterErrorsUseStructuredEnvelope(t *testing.T) {
 		wantCode   string
 	}{
 		{"not found", http.MethodGet, "/v1/not-a-route", http.StatusNotFound, "NOT_FOUND"},
-		{"method not allowed", http.MethodPut, "/v1/keys/", http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED"},
+		{"method not allowed", http.MethodPut, "/v1/auth/login", http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

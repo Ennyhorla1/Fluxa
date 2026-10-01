@@ -51,12 +51,12 @@ var (
 	ErrContractWasmNotConfigured = errors.New("contract wallet wasm hash is not configured")
 	ErrTrustlineNotApplicable    = errors.New("contract wallets do not use trustlines")
 
-	ErrTransferBlockedSanctions = errors.New("transfer blocked: destination matches a sanctions list entry")
-	ErrComplianceReviewNotFound = errors.New("compliance review not found")
-	ErrReviewNotPending         = errors.New("compliance review has already been decided")
-	ErrTransferApprovalNotFound = errors.New("transfer approval request not found")
-	ErrApprovalAlreadyDecided   = errors.New("transfer approval request has already been decided")
-	ErrApprovalExpired          = errors.New("transfer approval request has expired")
+	ErrTransferBlockedSanctions     = errors.New("transfer blocked: destination matches a sanctions list entry")
+	ErrComplianceReviewNotFound     = errors.New("compliance review not found")
+	ErrReviewNotPending             = errors.New("compliance review has already been decided")
+	ErrTransferApprovalNotFound     = errors.New("transfer approval request not found")
+	ErrApprovalAlreadyDecided       = errors.New("transfer approval request has already been decided")
+	ErrApprovalExpired              = errors.New("transfer approval request has expired")
 	ErrApprovalCreatorCannotApprove = errors.New("transfer creator cannot approve a second-person policy")
 
 	// Claimable balance errors. The claim path distinguishes "you cannot claim
@@ -74,6 +74,7 @@ var (
 	ErrSponsorNotCustodied        = errors.New("sponsor account is not a wallet custodied by Fluxa")
 	ErrInvalidAmount              = errors.New("amount must be a positive number")
 	ErrBeneficiaryNotAllowed      = errors.New("destination is not an active beneficiary")
+	ErrBeneficiaryAccountNotFound = errors.New("destination Stellar account does not exist")
 	ErrWalletBalanceAlertNotFound = errors.New("wallet balance alert not found")
 	ErrDuplicateAlert             = errors.New("wallet balance alert already exists for this wallet and asset")
 )

@@ -482,7 +482,7 @@ func (s *Service) checkTransaction(ctx context.Context, tx *domain.Transaction) 
 				return fmt.Errorf("update status to reconciliation_failed: %w", repoErr)
 			}
 
-			s.writeAudit(ctx, tx, "HTTP 404", false, false, false, AuditNotFound, "transaction not found on Horizon")
+			s.writeAudit(ctx, tx, "HTTP 404", false, false, false, domain.AuditNotFound, "transaction not found on Horizon")
 			s.alerting.Critical(ctx, "Reconciliation Failed: Missing Transaction",
 				fmt.Sprintf("Transaction %s (hash: %s) is marked confirmed in DB but returned 404 on Horizon. Possible ledger loss or fork.", tx.ID, hash))
 			return nil
@@ -496,7 +496,7 @@ func (s *Service) checkTransaction(ctx context.Context, tx *domain.Transaction) 
 			return fmt.Errorf("update status to reconciliation_failed: %w", repoErr)
 		}
 
-		s.writeAudit(ctx, tx, "unsuccessful", false, false, false, AuditNotFound,
+		s.writeAudit(ctx, tx, "unsuccessful", false, false, false, domain.AuditNotFound,
 			fmt.Sprintf("transaction successful=false on Horizon (result: %s)", horizonTx.ResultXdr))
 		s.alerting.Critical(ctx, "Reconciliation Failed: Unsuccessful Transaction",
 			fmt.Sprintf("Transaction %s (hash: %s) is marked confirmed in DB but Horizon reports it as unsuccessful.", tx.ID, hash))
@@ -524,13 +524,13 @@ func (s *Service) checkTransaction(ctx context.Context, tx *domain.Transaction) 
 			return fmt.Errorf("update status to reconciliation_failed: %w", repoErr)
 		}
 
-		s.writeAudit(ctx, tx, horizonStatus(&horizonTx), amountVerified, assetVerified, feeVerified, AuditMismatch, details)
+		s.writeAudit(ctx, tx, horizonStatus(&horizonTx), amountVerified, assetVerified, feeVerified, domain.AuditMismatch, details)
 		s.alerting.Critical(ctx, "Reconciliation Failed: Payment Mismatch",
 			fmt.Sprintf("Transaction %s (hash: %s): %s", tx.ID, hash, details))
 		return nil
 	}
 
-	s.writeAudit(ctx, tx, horizonStatus(&horizonTx), true, true, true, AuditOK, "all checks passed")
+	s.writeAudit(ctx, tx, horizonStatus(&horizonTx), true, true, true, domain.AuditOK, "all checks passed")
 	if err := s.repo.UpdateReconciledAt(ctx, tx.ID); err != nil {
 		log.Error().Err(err).Str("tx_id", tx.ID).Msg("reconcile: update reconciled_at")
 	}

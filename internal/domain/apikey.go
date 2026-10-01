@@ -7,63 +7,78 @@ import (
 )
 
 const (
-	ScopeTransfersRead      = "transfers:read"
-	ScopeTransfersWrite     = "transfers:write"
-	ScopeWalletsRead        = "wallets:read"
-	ScopeWalletsWrite       = "wallets:write"
-	ScopeWebhooksRead       = "webhooks:read"
-	ScopeWebhooksWrite      = "webhooks:write"
-	ScopeKeysRead           = "keys:read"
-	ScopeKeysWrite          = "keys:write"
-	ScopeAuditRead          = "audit:read"
-	ScopeFiatRead           = "fiat:read"
-	ScopeFiatWrite          = "fiat:write"
-	ScopeComplianceRead     = "compliance:read"
-	ScopeComplianceWrite    = "compliance:write"
-	ScopeFXRead             = "fx:read"
-	ScopeFXWrite            = "fx:write"
-	ScopeFeesRead           = "fees:read"
-	ScopeBeneficiariesRead  = "beneficiaries:read"
-	ScopeBeneficiariesWrite = "beneficiaries:write"
+	ScopeTransfersRead            = "transfers:read"
+	ScopeTransfersWrite           = "transfers:write"
+	ScopeWalletsRead              = "wallets:read"
+	ScopeWalletsWrite             = "wallets:write"
+	ScopeWebhooksRead             = "webhooks:read"
+	ScopeWebhooksWrite            = "webhooks:write"
+	ScopeKeysRead                 = "keys:read"
+	ScopeKeysWrite                = "keys:write"
+	ScopeAuditRead                = "audit:read"
+	ScopeFiatRead                 = "fiat:read"
+	ScopeFiatWrite                = "fiat:write"
+	ScopeComplianceRead           = "compliance:read"
+	ScopeComplianceWrite          = "compliance:write"
+	ScopeFXRead                   = "fx:read"
+	ScopeFXWrite                  = "fx:write"
+	ScopeFeesRead                 = "fees:read"
+	ScopeBeneficiariesRead        = "beneficiaries:read"
+	ScopeBeneficiariesWrite       = "beneficiaries:write"
+	ScopeBatchesRead              = "batches:read"
+	ScopeBatchesWrite             = "batches:write"
+	ScopeReportsRead              = "reports:read"
+	ScopeReportsWrite             = "reports:write"
 	ScopeWalletBalanceAlertsRead  = "wallet_balance_alerts:read"
 	ScopeWalletBalanceAlertsWrite = "wallet_balance_alerts:write"
-	ScopeWildcard           = "*"
+	ScopeWildcard                 = "*"
 )
 
 var ValidScopes = map[string]bool{
-	ScopeTransfersRead:      true,
-	ScopeTransfersWrite:     true,
-	ScopeWalletsRead:        true,
-	ScopeWalletsWrite:       true,
-	ScopeWebhooksRead:       true,
-	ScopeWebhooksWrite:      true,
-	ScopeKeysRead:           true,
-	ScopeKeysWrite:          true,
-	ScopeAuditRead:          true,
-	ScopeFiatRead:           true,
-	ScopeFiatWrite:          true,
-	ScopeComplianceRead:     true,
-	ScopeComplianceWrite:    true,
-	ScopeFXRead:             true,
-	ScopeFXWrite:            true,
-	ScopeFeesRead:                   true,
-	ScopeBeneficiariesRead:          true,
-	ScopeBeneficiariesWrite:         true,
-	ScopeWalletBalanceAlertsRead:    true,
-	ScopeWalletBalanceAlertsWrite:   true,
-	ScopeWildcard:                   true,
-	"admin":                         true,
-	"transfers:*":                   true,
-	"wallets:*":                     true,
-	"webhooks:*":                    true,
-	"keys:*":                        true,
-	"fiat:*":                        true,
-	"compliance:*":                  true,
-	"fx:*":                          true,
-	"fees:*":                        true,
-	"beneficiaries:*":               true,
-	"wallet_balance_alerts:*":      true,
-	"audit:*":                       true,
+	ScopeTransfersRead:            true,
+	ScopeTransfersWrite:           true,
+	ScopeWalletsRead:              true,
+	ScopeWalletsWrite:             true,
+	ScopeWebhooksRead:             true,
+	ScopeWebhooksWrite:            true,
+	ScopeKeysRead:                 true,
+	ScopeKeysWrite:                true,
+	ScopeAuditRead:                true,
+	ScopeFiatRead:                 true,
+	ScopeFiatWrite:                true,
+	ScopeComplianceRead:           true,
+	ScopeComplianceWrite:          true,
+	ScopeFXRead:                   true,
+	ScopeFXWrite:                  true,
+	ScopeFeesRead:                 true,
+	ScopeBeneficiariesRead:        true,
+	ScopeBeneficiariesWrite:       true,
+	ScopeBatchesRead:              true,
+	ScopeBatchesWrite:             true,
+	ScopeReportsRead:              true,
+	ScopeReportsWrite:             true,
+	ScopeWalletBalanceAlertsRead:  true,
+	ScopeWalletBalanceAlertsWrite: true,
+	ScopeWildcard:                 true,
+	"admin":                       true,
+	"transfers:*":                 true,
+	"wallets:*":                   true,
+	"webhooks:*":                  true,
+	"keys:*":                      true,
+	"fiat:*":                      true,
+	"compliance:*":                true,
+	"fx:*":                        true,
+	"fees:*":                      true,
+	"beneficiaries:*":             true,
+	"batches:*":                   true,
+	"reports:*":                   true,
+	"wallet_balance_alerts:*":     true,
+	"audit:*":                     true,
+}
+
+var legacyScopeGrants = map[string][]string{
+	ScopeBatchesRead:  {ScopeTransfersRead},
+	ScopeBatchesWrite: {ScopeTransfersWrite},
 }
 
 type APIKey struct {

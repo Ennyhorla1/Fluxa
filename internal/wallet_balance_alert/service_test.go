@@ -4,15 +4,14 @@ import (
 	"context"
 	"errors"
 	"testing"
-	"time"
 
 	"github.com/fluxa/fluxa/internal/domain"
 	"github.com/google/uuid"
 )
 
 type mockRepo struct {
-	alerts   map[string]*domain.WalletBalanceAlert
-	events   map[string][]*domain.WalletBalanceAlertEvent
+	alerts    map[string]*domain.WalletBalanceAlert
+	events    map[string][]*domain.WalletBalanceAlertEvent
 	createErr error
 	getErr    error
 }

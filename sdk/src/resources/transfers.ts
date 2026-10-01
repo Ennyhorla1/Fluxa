@@ -1,5 +1,5 @@
 import { HttpClient, RequestOptions } from '../http';
-import { generateIdempotencyKey } from '../http';
+import { makeIdempotencyKey } from '../http';
 import {
   CreateTransferRequest,
   TransferResponse,
@@ -21,7 +21,7 @@ export class TransfersResource {
       path: '/transfers',
       body: request,
       signal: options?.signal,
-      idempotencyKey: options?.idempotencyKey ?? generateIdempotencyKey(),
+      idempotencyKey: options?.idempotencyKey ?? makeIdempotencyKey(),
     });
     return res.data;
   }
@@ -98,7 +98,7 @@ export class TransfersResource {
       path: '/transfers/batch',
       body: request,
       signal: options?.signal,
-      idempotencyKey: options?.idempotencyKey ?? generateIdempotencyKey(),
+      idempotencyKey: options?.idempotencyKey ?? makeIdempotencyKey(),
     });
     return res.data;
   }

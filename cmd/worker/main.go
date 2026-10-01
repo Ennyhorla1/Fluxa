@@ -299,7 +299,7 @@ func main() {
 		)
 
 		complianceSvc := compliance.NewService(complianceRepo, screener, sanctionsSet, txRepo, qClient, webhookSvc)
-		transferSvc = transferSvc.WithScreener(complianceSvc)
+		transferSvc = transfer.ConfigureScreener(transferSvc, complianceSvc)
 		complianceWorker = compliance.NewWorker(
 			complianceRepo,
 			compliance.NewHTTPSDNSource(cfg.OFACSDNURL, nil),

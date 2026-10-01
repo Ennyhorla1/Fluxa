@@ -29,6 +29,7 @@ import (
 	"github.com/fluxa/fluxa/internal/schedule"
 	"github.com/fluxa/fluxa/internal/server/idempotency"
 	"github.com/fluxa/fluxa/internal/status"
+	"github.com/fluxa/fluxa/internal/tenantdata"
 	"github.com/fluxa/fluxa/internal/transfer"
 	"github.com/fluxa/fluxa/internal/transferapproval"
 	"github.com/fluxa/fluxa/internal/treasury"
@@ -66,7 +67,6 @@ func New(
 	complianceHandler *compliance.Handler,
 	auditHandler *audit.Handler,
 	usageHandler *UsageHandler,
-	idempotencyHandler *idempotency.Handler,
 	jwtSecret []byte,
 	port string,
 	healthChecks map[string]DependencyCheck,
@@ -81,6 +81,9 @@ func New(
 	var walletBalanceAlertHandler *wallet_balance_alert.Handler
 	var paymentLinkHandler *paymentlink.Handler
 	var refundHandler *refund.Handler
+	var transferApprovalHandler *transferapproval.Handler
+	var tenantDataHandler *tenantdata.Handler
+	var idempotencyHandler *idempotency.Handler
 	var scopeDenialRecorder ScopeDenialRecorder
 	for _, option := range options {
 		switch value := option.(type) {
@@ -94,11 +97,20 @@ func New(
 			paymentLinkHandler = value
 		case *refund.Handler:
 			refundHandler = value
+		case *transferapproval.Handler:
+			transferApprovalHandler = value
+		case *tenantdata.Handler:
+			tenantDataHandler = value
+		case *idempotency.Handler:
+			idempotencyHandler = value
 		case ScopeDenialRecorder:
 			scopeDenialRecorder = value
 		}
 	}
 	authLimiter := NewAuthRateLimiter(rateCfg)
+	if scopeDenialRecorder != nil {
+		r.Use(WithScopeDenialRecorder(scopeDenialRecorder))
+	}
 
 	r.Use(middleware.RealIP)
 	r.Use(requestID)
@@ -230,6 +242,7 @@ func New(
 				// Resource groups use RequireResourceScope so that every
 				// mutating method needs the :write scope, not just :read.
 				fiatScope := RequireResourceScope(domain.ScopeFiatRead, domain.ScopeFiatWrite)
+				_ = fiatScope
 				r.With(RequireResourceScope(domain.ScopeWalletsRead, domain.ScopeWalletsWrite)).Route("/wallets", walletHandler.Routes())
 				if beneficiaryHandler != nil {
 					r.With(RequireResourceScope(domain.ScopeBeneficiariesRead, domain.ScopeBeneficiariesWrite)).Route("/beneficiaries", beneficiaryHandler.Routes())

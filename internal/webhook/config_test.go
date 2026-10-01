@@ -29,8 +29,8 @@ func newMockConfigRepo() *mockConfigRepo {
 	return &mockConfigRepo{
 		configs:    make(map[string]*domain.TenantWebhookConfig),
 		deliveries: make(map[string]*domain.TenantWebhookDelivery),
-	secrets:    make(map[string]map[string]*domain.WebhookSigningSecret),
-	values:     make(map[string]map[string]string),
+		secrets:    make(map[string]map[string]*domain.WebhookSigningSecret),
+		values:     make(map[string]map[string]string),
 	}
 }
 
@@ -788,6 +788,9 @@ func TestDispatchToTenants_SendsSignedPayloadAndRecordsSuccess(t *testing.T) {
 	}
 	if gotKeyID != deliveries[0].SigningKeyID {
 		t.Fatalf("key ID header = %q, want pinned delivery key %q", gotKeyID, deliveries[0].SigningKeyID)
+	}
+	if gotTimestamp == "" {
+		t.Fatal("timestamp header is empty")
 	}
 	if gotEvent != string(domain.EventTransferSettled) {
 		t.Fatalf("event header = %q", gotEvent)

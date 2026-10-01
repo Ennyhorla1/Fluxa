@@ -81,15 +81,25 @@ type Service interface {
 	// using InitiateTransfer directly.
 	InitiateTransferIdempotent(ctx context.Context, fromID, toID, asset string, amount decimal.Decimal, idempotencyKey string) (*domain.Transaction, error)
 	InitiateBatchTransfer(ctx context.Context, fromID, toID, asset string, amount decimal.Decimal, batchID, reference string) (*domain.Transaction, error)
-	InitiateTransferExt(ctx context.Context, params TransferParams) (*domain.Transaction, error)
 	GetTransaction(ctx context.Context, id string) (*domain.Transaction, error)
 	ListTransactions(ctx context.Context, walletID string, limit, offset int) ([]*domain.Transaction, error)
-	ListTransactionsFiltered(ctx context.Context, filter domain.TransactionFilter) ([]*domain.Transaction, error)
-	WithStellarClient(stellarClient stellar.Client) Service
 	// WithScreener enables compliance screening. It is optional so the
 	// worker's screener-less wiring still compiles; when unset, transfers
 	// are not screened.
-	WithScreener(screener Screener) Service
+}
+
+func ConfigureStellarClient(svc Service, client stellar.Client) Service {
+	if configurable, ok := svc.(interface{ WithStellarClient(stellar.Client) Service }); ok {
+		return configurable.WithStellarClient(client)
+	}
+	return svc
+}
+
+func ConfigureScreener(svc Service, screener Screener) Service {
+	if configurable, ok := svc.(interface{ WithScreener(Screener) Service }); ok {
+		return configurable.WithScreener(screener)
+	}
+	return svc
 }
 
 // Queue is the subset of the asynq-backed queue client the transfer service
@@ -383,7 +393,13 @@ func (s *service) initiate(ctx context.Context, params TransferParams) (*domain.
 	var createErr error
 	now := time.Now().UTC()
 	if dailyLimit > 0 {
-		createErr = s.repo.CreateWithDailyLimit(ctx, tx, tenantID, now, dailyLimit)
+		dailyRepo, ok := s.repo.(interface {
+			CreateWithDailyLimit(context.Context, *domain.Transaction, string, time.Time, int) error
+		})
+		if !ok {
+			return nil, errors.New("daily transfer limit enforcement is unavailable")
+		}
+		createErr = dailyRepo.CreateWithDailyLimit(ctx, tx, tenantID, now, dailyLimit)
 	} else if monthlyLimit > 0 {
 		createErr = s.repo.CreateWithMonthlyLimit(ctx, tx, tenantID, now.Year(), now.Month(), monthlyLimit)
 	} else {
@@ -529,7 +545,8 @@ func (s *service) CancelTransfer(ctx context.Context, id, actor, idempotencyKey 
 }
 
 func (s *service) dispatchCancelWebhook(ctx context.Context, id, actor string) error {
-	return s.recordAudit(ctx, actor, "transfer.cancel", id)
+	s.recordAudit(ctx, actor, "transfer.cancel", id)
+	return nil
 }
 
 func (s *service) ListTransactions(ctx context.Context, walletID string, limit, offset int) ([]*domain.Transaction, error) {

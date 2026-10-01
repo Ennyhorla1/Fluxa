@@ -8,7 +8,6 @@ import (
 
 	"github.com/fluxa/fluxa/internal/api"
 	"github.com/fluxa/fluxa/internal/domain"
-	"github.com/fluxa/fluxa/internal/tenant"
 	"github.com/go-chi/chi/v5"
 )
 

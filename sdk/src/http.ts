@@ -6,6 +6,8 @@ export interface HttpClientConfig {
   timeout: number;
   maxRetries: number;
   retryDelay: number;
+  idempotencyKey?: string;
+  requireIdempotencyKey?: boolean;
 }
 
 export interface RequestOptions {
@@ -135,7 +137,8 @@ export class HttpClient {
     const idempotencyKey =
       options.idempotencyKey ||
       existingKey ||
-      (needsKey ? makeIdempotencyKey() : undefinet);
+      this.config.idempotencyKey ||
+      (needsKey ? makeIdempotencyKey() : undefined);
     if (idempotencyKey && !existingKey) headers['Idempotency-Key'] = idempotencyKey;
 
     // Mutations are only retryable when they carry an idempotency key.

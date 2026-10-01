@@ -119,7 +119,7 @@ func HandleDomainError(w http.ResponseWriter, err error) {
 		errors.Is(err, domain.ErrInviteNotFound), errors.Is(err, domain.ErrClaimableBalanceNotFound):
 		NotFound(w, err.Error())
 	case errors.Is(err, domain.ErrSelfTransfer), errors.Is(err, domain.ErrInvalidAsset),
-		errors.Is(err, domain.ErrBeneficiaryNotAllowed), errors.Is(err, domain.ErrBeneficiaryAccountNotFound),
+		errors.Is(err, domain.ErrBeneficiaryNotAllowed),
 		errors.Is(err, domain.ErrInsufficientBalance), errors.Is(err, domain.ErrSlippageExceeded),
 		errors.Is(err, domain.ErrFeeScheduleNotFound), errors.Is(err, domain.ErrBatchTooLarge),
 		errors.Is(err, domain.ErrBatchEmpty), errors.Is(err, domain.ErrWalletLimitReached),
@@ -170,8 +170,12 @@ func HandleDomainError(w http.ResponseWriter, err error) {
 	// retrying with the same destination will always fail.
 	case errors.Is(err, domain.ErrTransferBlockedSanctions):
 		Error(w, http.StatusForbidden, "TRANSFER_BLOCKED_SANCTIONS", err.Error())
-	case errors.As(err, new(domain.ErrTransferNotCancellable)):
-		e := err.(*domain.ErrTransferNotCancellable)
+	case func() bool {
+		var target *domain.ErrTransferNotCancellable
+		return errors.As(err, &target)
+	}():
+		var e *domain.ErrTransferNotCancellable
+		_ = errors.As(err, &e)
 		msg := "transfer cannot be cancelled: status " + e.Status
 		if e.TxHash != "" {
 			msg += ", tx_hash " + e.TxHash

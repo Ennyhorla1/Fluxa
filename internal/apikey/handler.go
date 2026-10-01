@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/fluxa/fluxa/internal/api"
@@ -13,6 +14,12 @@ import (
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
 )
+
+func preserveRequestID(w http.ResponseWriter, r *http.Request) {
+	if id := strings.TrimSpace(r.Header.Get("X-Request-ID")); id != "" {
+		w.Header().Set("X-Request-ID", id)
+	}
+}
 
 type AuditLogger interface {
 	Log(r *http.Request, action, resourceType, resourceID string, metadata map[string]interface{})
@@ -45,6 +52,7 @@ func (h *Handler) WithAuditLogger(audit AuditLogger) *Handler {
 }
 
 func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
+	preserveRequestID(w, r)
 	tenantID := tenant.IDFromContext(r.Context())
 	mode, ok := tenant.ModeFromContext(r.Context())
 	if tenantID == "" || !ok {
@@ -183,6 +191,7 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
+	preserveRequestID(w, r)
 	tenantID := tenant.IDFromContext(r.Context())
 	mode, ok := tenant.ModeFromContext(r.Context())
 	if tenantID == "" || !ok {
@@ -221,6 +230,7 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) Revoke(w http.ResponseWriter, r *http.Request) {
+	preserveRequestID(w, r)
 	tenantID := tenant.IDFromContext(r.Context())
 	mode, ok := tenant.ModeFromContext(r.Context())
 	if tenantID == "" || !ok {
@@ -246,6 +256,7 @@ func (h *Handler) Revoke(w http.ResponseWriter, r *http.Request) {
 
 // UpdateExpiry updates an existing API key's expiration policy.
 func (h *Handler) UpdateExpiry(w http.ResponseWriter, r *http.Request) {
+	preserveRequestID(w, r)
 	tenantID := tenant.IDFromContext(r.Context())
 	mode, ok := tenant.ModeFromContext(r.Context())
 	if tenantID == "" || !ok {
@@ -301,6 +312,7 @@ func (h *Handler) UpdateExpiry(w http.ResponseWriter, r *http.Request) {
 // Rotate atomically revokes the specified key and provisions a fresh replacement key
 // with matching role, scopes, label, mode, and renewal expiry policy.
 func (h *Handler) Rotate(w http.ResponseWriter, r *http.Request) {
+	preserveRequestID(w, r)
 	tenantID := tenant.IDFromContext(r.Context())
 	mode, ok := tenant.ModeFromContext(r.Context())
 	if tenantID == "" || !ok {

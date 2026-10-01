@@ -28,7 +28,6 @@ type Repository interface {
 	CreateWithdrawal(ctx context.Context, w *domain.FiatWithdrawal) error
 	UpdateWithdrawalStatus(ctx context.Context, id, status string) error
 	GetWithdrawalByReference(ctx context.Context, ref string) (*domain.FiatWithdrawal, error)
-	CountDailyWithdrawalsByTenant(ctx context.Context, tenantID string, date time.Time) (int, error)
 }
 
 type WebhookEventRepository interface {
@@ -191,7 +190,13 @@ func (s *service) InitiateWithdrawal(ctx context.Context, req WithdrawRequest) (
 			dailyLimit := t.GetDailyWithdrawalLimit()
 			if dailyLimit > 0 {
 				now := time.Now().UTC()
-				count, err := s.repo.CountDailyWithdrawalsByTenant(ctx, tenantID, now)
+				counter, ok := s.repo.(interface {
+					CountDailyWithdrawalsByTenant(context.Context, string, time.Time) (int, error)
+				})
+				if !ok {
+					return nil, errors.New("daily withdrawal limit counter is unavailable")
+				}
+				count, err := counter.CountDailyWithdrawalsByTenant(ctx, tenantID, now)
 				if err != nil {
 					return nil, fmt.Errorf("check daily withdrawal limit: %w", err)
 				}
