@@ -13,6 +13,10 @@ type Repository interface {
 	// count and inserts the transaction in a single database transaction,
 	// preventing concurrent requests from exceeding the quota.
 	CreateWithMonthlyLimit(ctx context.Context, tx *domain.Transaction, tenantID string, year int, month time.Month, limit int) error
+	// CreateWithDailyLimit atomically checks the tenant's daily transfer
+	// count and inserts the transaction in a single database transaction,
+	// preventing concurrent requests from exceeding the quota.
+	CreateWithDailyLimit(ctx context.Context, tx *domain.Transaction, tenantID string, date time.Time, limit int) error
 	GetByID(ctx context.Context, id string) (*domain.Transaction, error)
 	ClaimForSubmission(ctx context.Context, id string) error
 	UpdateStatus(ctx context.Context, id string, status domain.TransactionStatus, txHash string) error
@@ -20,6 +24,7 @@ type Repository interface {
 	UpsertByTxHash(ctx context.Context, tx *domain.Transaction) error
 	ListByBatch(ctx context.Context, batchID string) ([]*domain.Transaction, error)
 	CountMonthlyTransfersByTenant(ctx context.Context, tenantID string, year int, month time.Month) (int, error)
+	CountDailyTransfersByTenant(ctx context.Context, tenantID string, date time.Time) (int, error)
 	ExistsByTxHash(ctx context.Context, txHash string) (bool, error)
 	GetByIdempotencyKey(ctx context.Context, orgID, idempotencyKey string) (*domain.Transaction, error)
 }
