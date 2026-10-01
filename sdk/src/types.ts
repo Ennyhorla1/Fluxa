@@ -65,10 +65,16 @@ export interface ListTransactionsQuery {
   wallet_id: string;
   limit?: number;
   offset?: number;
+  cursor?: string;
+  external_reference?: string;
+  tag?: string;
+  [key: string]: unknown;
 }
 
 export interface ListTransactionsResponse {
   transactions: TransferResponse[];
+  next_cursor?: string | null;
+  cursor?: string | null;
 }
 
 // ── Batch ───────────────────────────────────────────────────────────────────

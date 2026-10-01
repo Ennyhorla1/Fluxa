@@ -9,7 +9,11 @@ export {
   ValidationError,
   RateLimitError,
   ConflictError,
+  RepeatedCursorError,
 } from './errors';
+
+export { createPage, paginate, paginatePages, paginateAll } from './pagination';
+export type { Page, PageFetcher, PaginateOptions } from './pagination';
 
 export type {
   // Wallet
