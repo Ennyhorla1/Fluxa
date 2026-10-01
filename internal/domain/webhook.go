@@ -8,22 +8,11 @@ import (
 type EventType string
 
 const (
-	EventTypePaymentCompleted    = "payment.completed"
-	EventTypePaymentFailed       = "payment.failed"
-	EventTypeFxQuoteCreated      = "fx.quote.created"
-	EventTypeSettlementCompleted = "settlement.completed"
-	EventTypeBatchCompleted      = "batch.completed"
-
-	EventTransferInitiated      = "transfer.initiated"
 	EventTransferSettled        = "transfer.settled"
 	EventTransferFailed         = "transfer.failed"
 	EventWalletFunded           = "wallet.funded"
-	EventConversionCompleted    = "conversion.completed"
 	EventTreasurySweepCompleted = "treasury.sweep_completed"
 	EventReconciliationDrift    = "reconciliation.drift"
-	EventFxRateAlertTriggered   = "fx.rate_alert.triggered"
-	EventWalletConsolidated     = "wallet.consolidated"
-	EventAccountClosed          = "account.closed"
 
 	EventTransferComplianceHold     = "transfer.compliance.hold"
 	EventTransferComplianceApproved = "transfer.compliance.approved"
@@ -37,23 +26,33 @@ const (
 
 	EventAPIKeyRotationReminder = "api_key.rotation_reminder"
 	EventAPIKeyExpired          = "api_key.expired"
-
-	DeliveryStatusPending   = "pending"
-	DeliveryStatusDelivered = "delivered"
-	DeliveryStatusFailed    = "failed"
 )
 
 var SupportedEventTypes = []string{
 	EventTransferSettled,
 	EventTransferFailed,
 	EventWalletFunded,
-	EventTypePaymentCompleted,
-	EventTypePaymentFailed,
-	EventTypeFxQuoteCreated,
-	EventTypeSettlementCompleted,
-	EventTypeBatchCompleted,
+	EventTreasurySweepCompleted,
+	EventReconciliationDrift,
+	EventTransferComplianceHold,
+	EventTransferComplianceApproved,
+	EventTransferComplianceRejected,
+	EventSanctionsRefreshFailed,
+	EventClaimableBalanceCreated,
+	EventClaimableBalanceClaimed,
+	EventClaimableBalanceExpired,
+	EventClaimableBalanceRevoked,
 	EventAPIKeyRotationReminder,
 	EventAPIKeyExpired,
+}
+
+func IsSupportedEventType(eventType string) bool {
+	for _, supported := range SupportedEventTypes {
+		if eventType == supported {
+			return true
+		}
+	}
+	return false
 }
 
 type WebhookEndpoint struct {
