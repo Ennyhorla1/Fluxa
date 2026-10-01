@@ -15,6 +15,7 @@ import {
   Layers,
   Calendar,
   Banknote,
+  Link2,
 } from 'lucide-react';
 import { useAuth } from '@/lib/auth-context';
 import { cn } from '@/lib/utils';
@@ -28,6 +29,7 @@ const navItems = [
   { name: 'FX', href: '/fx', icon: Coins },
   { name: 'Conversions', href: '/conversions', icon: Coins },
   { name: 'Fiat', href: '/fiat', icon: Banknote },
+  { name: 'Payment Links', href: '/payment-links', icon: Link2 },
   { name: 'API Keys', href: '/api-keys', icon: KeyRound },
   { name: 'Webhooks', href: '/webhooks', icon: Webhook },
   { name: 'Usage', href: '/usage', icon: BarChart3 },
@@ -51,9 +53,7 @@ export default function Sidebar() {
           <span className="text-sm font-bold">F</span>
         </div>
         <div className="flex items-baseline gap-2">
-          <span className="text-lg font-semibold tracking-tight text-foreground">
-            Fluxa
-          </span>
+          <span className="text-lg font-semibold tracking-tight text-foreground">Fluxa</span>
           <span className="rounded border border-border px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
             Tenant
           </span>
@@ -72,15 +72,13 @@ export default function Sidebar() {
                 'group flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium transition-colors',
                 isActive
                   ? 'bg-primary-subtle text-primary'
-                  : 'text-muted-foreground hover:bg-muted hover:text-foreground'
+                  : 'text-muted-foreground hover:bg-muted hover:text-foreground',
               )}
             >
               <Icon
                 className={cn(
                   'h-5 w-5 transition-colors',
-                  isActive
-                    ? 'text-primary'
-                    : 'text-muted-foreground group-hover:text-foreground'
+                  isActive ? 'text-primary' : 'text-muted-foreground group-hover:text-foreground',
                 )}
               />
               {item.name}

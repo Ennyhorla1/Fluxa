@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/fluxa/fluxa/internal/domain"
+	"github.com/fluxa/fluxa/internal/tenant"
 	"github.com/fluxa/fluxa/internal/transfer"
 	"github.com/google/uuid"
 	"github.com/shopspring/decimal"
@@ -72,16 +73,21 @@ func (s *service) CreateBatch(ctx context.Context, fromWalletID string, items []
 		tx, err := s.transferSvc.InitiateBatchTransfer(ctx, fromWalletID, item.ToWalletID, item.Asset, item.Amount, b.ID, item.Reference)
 		if err != nil {
 			tx = &domain.Transaction{
-				ID:         uuid.New().String(),
-				Type:       domain.TypeTransfer,
-				Status:     domain.StatusFailed,
-				FromWallet: fromWalletID,
-				ToWallet:   item.ToWalletID,
-				Asset:      item.Asset,
-				Amount:     item.Amount,
-				BatchID:    &b.ID,
-				Reference:  item.Reference,
-				CreatedAt:  time.Now().UTC(),
+				ID:             uuid.New().String(),
+				Type:           domain.TypeTransfer,
+				Status:         domain.StatusFailed,
+				FromWallet:     fromWalletID,
+				ToWallet:       item.ToWalletID,
+				Asset:          item.Asset,
+				Amount:         item.Amount,
+				BatchID:        &b.ID,
+				Reference:      item.Reference,
+				FailureReason:  "transfer_initiation_failed",
+				FailureMessage: err.Error(),
+				CreatedAt:      time.Now().UTC(),
+			}
+			if tenantID := tenant.IDFromContext(ctx); tenantID != "" {
+				tx.TenantID = &tenantID
 			}
 			if createErr := s.txRepo.Create(ctx, tx); createErr != nil {
 				return nil, fmt.Errorf("persist failed batch item: %w", createErr)

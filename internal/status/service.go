@@ -8,7 +8,9 @@ import (
 )
 
 type Service struct {
-	repo Repository
+	repo                 Repository
+	dependencyHistory    DependencyHistoryRepository
+	expectedDependencies []string
 }
 
 func NewService(repo Repository) *Service {
@@ -16,10 +18,11 @@ func NewService(repo Repository) *Service {
 }
 
 type StatusResponse struct {
-	APIVersion      string            `json:"api_version"`
-	Status          string            `json:"status"` // operational, degraded, outage
-	Message         string            `json:"message"`
-	RecentIncidents []domain.Incident `json:"recent_incidents"`
+	APIVersion      string             `json:"api_version"`
+	Status          string             `json:"status"` // operational, degraded, outage
+	Message         string             `json:"message"`
+	RecentIncidents []domain.Incident  `json:"recent_incidents"`
+	Dependencies    []DependencyStatus `json:"dependencies,omitempty"`
 }
 
 func (s *Service) GetStatus(ctx context.Context) (*StatusResponse, error) {
@@ -27,17 +30,17 @@ func (s *Service) GetStatus(ctx context.Context) (*StatusResponse, error) {
 	if err != nil {
 		return nil, err
 	}
+	activeIncidents, err := s.repo.ListActive(ctx)
+	if err != nil {
+		return nil, err
+	}
+	dependencies, dependenciesDegraded, dependenciesUnavailable, err := s.dependencyStatuses(ctx)
+	if err != nil {
+		return nil, err
+	}
 
 	operationalStatus := "operational"
 	message := "All systems operational"
-
-	// Check active incidents
-	var activeIncidents []domain.Incident
-	for _, inc := range incidents {
-		if inc.Status != string(domain.StatusResolved) {
-			activeIncidents = append(activeIncidents, inc)
-		}
-	}
 
 	if len(activeIncidents) > 0 {
 		highestSeverity := domain.SeverityMinor
@@ -64,6 +67,14 @@ func (s *Service) GetStatus(ctx context.Context) (*StatusResponse, error) {
 		}
 	}
 
+	if dependenciesUnavailable {
+		operationalStatus = "outage"
+		message = "All monitored dependencies are unavailable"
+	} else if dependenciesDegraded && operationalStatus == "operational" {
+		operationalStatus = "degraded"
+		message = "One or more dependencies are degraded or have stale status"
+	}
+
 	// Get recent incidents (last 5)
 	recent := incidents
 	if len(recent) > 5 {
@@ -75,6 +86,7 @@ func (s *Service) GetStatus(ctx context.Context) (*StatusResponse, error) {
 		Status:          operationalStatus,
 		Message:         message,
 		RecentIncidents: recent,
+		Dependencies:    dependencies,
 	}, nil
 }
 
@@ -88,7 +100,7 @@ func (s *Service) CreateIncident(ctx context.Context, req domain.CreateIncidentR
 		Description: req.Description,
 		Severity:    req.Severity,
 		Status:      string(domain.StatusInvestigating),
-		CreatedAt:   time.Now(),
+		CreatedAt:   time.Now().UTC(),
 	}
 	err := s.repo.Create(ctx, inc)
 	return inc, err
@@ -112,7 +124,7 @@ func (s *Service) UpdateIncident(ctx context.Context, id string, req domain.Upda
 	if req.Status != nil {
 		newStatus := *req.Status
 		if newStatus == string(domain.StatusResolved) && inc.Status != string(domain.StatusResolved) {
-			now := time.Now()
+			now := time.Now().UTC()
 			inc.ResolvedAt = &now
 		} else if newStatus != string(domain.StatusResolved) {
 			inc.ResolvedAt = nil

@@ -2,12 +2,15 @@ package fiat
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 
 	"github.com/fluxa/fluxa/internal/domain"
 	"github.com/fluxa/fluxa/internal/fx"
+	"github.com/fluxa/fluxa/internal/tenant"
 	"github.com/fluxa/fluxa/internal/transfer"
 	"github.com/google/uuid"
 )
@@ -35,7 +38,18 @@ type Service interface {
 	GetQuote(ctx context.Context, req QuoteRequest) (*FiatQuote, error)
 	InitiateDeposit(ctx context.Context, req DepositRequest) (*DepositResponse, error)
 	InitiateWithdrawal(ctx context.Context, req WithdrawRequest) (*WithdrawResponse, error)
+	// HandleWebhook is the legacy single-signature form (kept for backward
+	// compatibility with existing tests and the Rail adapter).
 	HandleWebhook(ctx context.Context, payload []byte, signature string) error
+	// HandleWebhookWithHeaders is the preferred form used by the HTTP handler:
+	// it passes the full request headers so each provider can read its own
+	// signature header(s) (e.g. "verif-hash", "x-yellowcard-signature") without
+	// the HTTP layer hard-coding provider-specific header names.
+	HandleWebhookWithHeaders(ctx context.Context, payload []byte, headers http.Header) error
+}
+
+type TenantGetter interface {
+	GetByID(ctx context.Context, id string) (*domain.Tenant, error)
 }
 
 type service struct {
@@ -46,6 +60,7 @@ type service struct {
 	transferSvc      transfer.Service
 	platformWalletID string
 	providerName     string
+	tenantRepo       TenantGetter
 }
 
 func NewService(repo Repository, rail Rail, fxSvc fx.Service, transferSvc transfer.Service, platformWalletID, providerName string, eventRepos ...WebhookEventRepository) Service {
@@ -64,16 +79,66 @@ func NewService(repo Repository, rail Rail, fxSvc fx.Service, transferSvc transf
 	}
 }
 
+func NewServiceWithTenant(repo Repository, rail Rail, fxSvc fx.Service, transferSvc transfer.Service, platformWalletID, providerName string, tenantRepo TenantGetter, eventRepos ...WebhookEventRepository) Service {
+	var eventRepo WebhookEventRepository
+	if len(eventRepos) > 0 {
+		eventRepo = eventRepos[0]
+	}
+	return &service{
+		repo:             repo,
+		eventRepo:        eventRepo,
+		rail:             rail,
+		fxSvc:            fxSvc,
+		transferSvc:      transferSvc,
+		platformWalletID: platformWalletID,
+		providerName:     providerName,
+		tenantRepo:       tenantRepo,
+	}
+}
+
 func (s *service) GetQuote(ctx context.Context, req QuoteRequest) (*FiatQuote, error) {
 	return s.rail.GetQuote(ctx, req)
 }
 
+// validateFiatCurrency checks code against the rail's supported list and
+// returns it normalised (trimmed, upper case). It runs before any pricing so an
+// unsupported currency is rejected without touching the rail's quote API.
+func (s *service) validateFiatCurrency(code string) (string, error) {
+	norm := strings.ToUpper(strings.TrimSpace(code))
+	if norm != "" {
+		for _, c := range s.rail.SupportedCurrencies() {
+			if strings.EqualFold(c, norm) {
+				return norm, nil
+			}
+		}
+	}
+	return "", fmt.Errorf("%w: %q", domain.ErrUnsupportedFiatCurrency, code)
+}
+
+func (s *service) SupportsCurrency(code string) bool {
+	_, err := s.validateFiatCurrency(code)
+	return err == nil
+}
+
 func (s *service) InitiateDeposit(ctx context.Context, req DepositRequest) (*DepositResponse, error) {
-	// First get a quote for USDC to ensure conversion is possible and to record expected amount
-	// In deposit, user pays Fiat (Source), gets USDC (Dest).
-	quote, err := s.fxSvc.GetQuote(ctx, req.FiatCurrency, "USDC", req.FiatAmount.String())
+	currency, err := s.validateFiatCurrency(req.FiatCurrency)
+	if err != nil {
+		return nil, err
+	}
+	req.FiatCurrency = currency
+
+	// Price the deposit with the rail: the user pays fiat and receives USDC.
+	// The FX service only quotes Stellar assets, so it cannot price a fiat leg.
+	quote, err := s.rail.GetQuote(ctx, QuoteRequest{
+		Side:         "deposit",
+		FiatCurrency: req.FiatCurrency,
+		FiatAmount:   req.FiatAmount,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("get quote for deposit: %w", err)
+	}
+	if !quote.USDCAmount.IsPositive() {
+		return nil, fmt.Errorf("rail returned a non-positive USDC amount for deposit")
 	}
 
 	deposit := &domain.FiatDeposit{
@@ -83,9 +148,18 @@ func (s *service) InitiateDeposit(ctx context.Context, req DepositRequest) (*Dep
 		ProviderReference: req.Reference,
 		FiatAmount:        req.FiatAmount,
 		FiatCurrency:      req.FiatCurrency,
-		USDCAmount:        quote.ToAmount, // amount of USDC to credit user
+		USDCAmount:        quote.USDCAmount, // amount of USDC to credit user
 		Status:            domain.FiatStatusPending,
 		CreatedAt:         time.Now().UTC(),
+	}
+	if req.PaymentLinkID != "" {
+		deposit.PaymentLinkID = &req.PaymentLinkID
+	}
+	if tenantID := tenant.IDFromContext(ctx); tenantID != "" {
+		deposit.TenantID = &tenantID
+	}
+	if mode, ok := tenant.ModeFromContext(ctx); ok {
+		deposit.Mode = mode
 	}
 
 	if err := s.repo.CreateDeposit(ctx, deposit); err != nil {
@@ -102,19 +176,52 @@ func (s *service) InitiateDeposit(ctx context.Context, req DepositRequest) (*Dep
 }
 
 func (s *service) InitiateWithdrawal(ctx context.Context, req WithdrawRequest) (*WithdrawResponse, error) {
-	// For withdrawal, user provides Fiat amount they want to receive.
-	// Get live exchange rate from FX service. We fetch the quote for 1 USDC to determine the rate.
-	quote, err := s.fxSvc.GetQuote(ctx, "USDC", req.FiatCurrency, "1")
+	currency, err := s.validateFiatCurrency(req.FiatCurrency)
 	if err != nil {
-		return nil, fmt.Errorf("get FX rate for withdrawal: %w", err)
+		return nil, err
+	}
+	req.FiatCurrency = currency
+
+	// Check daily withdrawal limit if tenant repo is available
+	tenantID := tenant.IDFromContext(ctx)
+	if tenantID != "" && s.tenantRepo != nil {
+		t, err := s.tenantRepo.GetByID(ctx, tenantID)
+		if err == nil && t != nil {
+			dailyLimit := t.GetDailyWithdrawalLimit()
+			if dailyLimit > 0 {
+				now := time.Now().UTC()
+				counter, ok := s.repo.(interface {
+					CountDailyWithdrawalsByTenant(context.Context, string, time.Time) (int, error)
+				})
+				if !ok {
+					return nil, errors.New("daily withdrawal limit counter is unavailable")
+				}
+				count, err := counter.CountDailyWithdrawalsByTenant(ctx, tenantID, now)
+				if err != nil {
+					return nil, fmt.Errorf("check daily withdrawal limit: %w", err)
+				}
+				if count >= dailyLimit {
+					return nil, domain.ErrDailyWithdrawalLimitReached
+				}
+			}
+		}
 	}
 
-	rate := quote.Rate
-	if rate.IsZero() {
-		return nil, fmt.Errorf("FX service returned a zero exchange rate")
+	// The user states the fiat amount they want to receive; the rail tells us
+	// how much USDC that costs.
+	quote, err := s.rail.GetQuote(ctx, QuoteRequest{
+		Side:         "withdraw",
+		FiatCurrency: req.FiatCurrency,
+		FiatAmount:   req.FiatAmount,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("get quote for withdrawal: %w", err)
 	}
 
-	usdcAmount := req.FiatAmount.Div(rate)
+	usdcAmount := quote.USDCAmount
+	if !usdcAmount.IsPositive() {
+		return nil, fmt.Errorf("rail returned a non-positive USDC amount for withdrawal")
+	}
 
 	withdrawal := &domain.FiatWithdrawal{
 		ID:                uuid.New().String(),
@@ -153,11 +260,45 @@ func (s *service) HandleWebhook(ctx context.Context, payload []byte, signature s
 	if err != nil {
 		return fmt.Errorf("handle webhook: %w", err)
 	}
+	return s.processEvent(ctx, evt)
+}
 
+// HandleWebhookWithHeaders is the HTTP-handler-facing entry point. It passes
+// the full header map to the rail so each provider can read its own signature
+// header(s) without the service layer knowing their names.
+//
+// Errors are wrapped with the appropriate sentinel (ErrWebhookSignatureInvalid,
+// ErrWebhookPayloadInvalid, ErrWebhookEventUnknown) when the failure is
+// permanent so the HTTP handler can distinguish 4xx from 5xx responses.
+func (s *service) HandleWebhookWithHeaders(ctx context.Context, payload []byte, headers http.Header) error {
+	evt, err := s.rail.HandleWebhookWithHeaders(ctx, payload, headers)
+	if err != nil {
+		// Wrap provider-level validation errors so the HTTP handler can map
+		// them to 4xx without inspecting the error string.
+		if errors.Is(err, ErrWebhookSignatureInvalid) ||
+			errors.Is(err, ErrWebhookPayloadInvalid) ||
+			errors.Is(err, ErrWebhookEventUnknown) {
+			return err
+		}
+		return fmt.Errorf("handle webhook: %w", err)
+	}
+
+	return s.processEvent(ctx, evt)
+}
+
+// processEvent applies the business logic for a fully-verified RailEvent.
+// It is shared by both HandleWebhook (legacy) and HandleWebhookWithHeaders.
+func (s *service) processEvent(ctx context.Context, evt *RailEvent) error {
 	if evt.Type == EventDepositConfirmed || evt.Type == EventDepositFailed {
 		deposit, err := s.repo.GetDepositByReference(ctx, evt.ProviderRef)
 		if err != nil {
 			return fmt.Errorf("get deposit by ref: %w", err)
+		}
+		if deposit.TenantID != nil {
+			ctx = tenant.WithID(ctx, *deposit.TenantID)
+		}
+		if deposit.Mode.Valid() {
+			ctx = tenant.WithMode(ctx, deposit.Mode)
 		}
 
 		if deposit.Status != domain.FiatStatusPending {
@@ -184,8 +325,7 @@ func (s *service) HandleWebhook(ctx context.Context, payload []byte, signature s
 		// Atomically claim the deposit BEFORE moving any funds. This is
 		// what makes a concurrent or duplicate webhook delivery for the
 		// same event safe: only the caller that wins this pending ->
-		// processing transition proceeds to credit the wallet, so the
-		// same deposit can never be credited twice.
+		// processing transition proceeds to credit the wallet.
 		if err := s.repo.ClaimDepositForProcessing(ctx, deposit.ID); err != nil {
 			return nil // lost the race, or already handled — idempotent no-op
 		}

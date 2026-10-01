@@ -6,13 +6,12 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"net"
-	"strings"
 	"time"
 
 	"github.com/fluxa/fluxa/internal/domain"
 	"github.com/fluxa/fluxa/internal/fees"
 	"github.com/fluxa/fluxa/internal/stellar"
+	"github.com/fluxa/fluxa/internal/tenant"
 	"github.com/fluxa/fluxa/internal/transfer"
 	"github.com/fluxa/fluxa/internal/wallet"
 	"github.com/google/uuid"
@@ -22,23 +21,20 @@ import (
 	"github.com/stellar/go/txnbuild"
 )
 
-var (
-	ErrRetryableRateLimit = errors.New("retryable rate limit")
-	ErrRetryableService   = errors.New("retryable service unavailable")
-	ErrRetryableTimeout   = errors.New("retryable timeout")
-)
-
 type Engine struct {
-	txRepo         transfer.Repository
-	walletRepo     wallet.Repository
-	feeSvc         fees.Service
-	stellar        stellar.Client
+	txRepo     transfer.Repository
+	walletRepo wallet.Repository
+	feeSvc     fees.Service
+	stellar    stellar.Client
+	// clientResolver and signerResolver select the live or testnet client for
+	// the request's environment. They are nil for single-environment callers,
+	// in which case stellar/signer are used directly.
+	clientResolver stellar.ClientResolver
 	signer         stellar.Signer
+	signerResolver stellar.SignerResolver
 	network        string
 	assetIssuers   map[string]string
 	feeWallet      string
-	maxAttempts    int
-	backoffSeconds int
 }
 
 func NewEngine(
@@ -60,18 +56,35 @@ func NewEngine(
 		network:        network,
 		assetIssuers:   assetIssuers,
 		feeWallet:      feeWallet,
-		maxAttempts:    3,
-		backoffSeconds: 2,
 	}
 }
 
-func (e *Engine) SetRetryPolicy(attempts, backoffSeconds int) {
-	if attempts > 0 {
-		e.maxAttempts = attempts
+func (e *Engine) WithClientResolver(resolver stellar.ClientResolver) *Engine {
+	e.clientResolver = resolver
+	return e
+}
+
+func (e *Engine) WithSignerResolver(resolver stellar.SignerResolver) *Engine {
+	e.signerResolver = resolver
+	return e
+}
+
+func (e *Engine) client(ctx context.Context) stellar.Client {
+	if e.clientResolver != nil {
+		if client := e.clientResolver.ClientForMode(ctx); client != nil {
+			return client
+		}
 	}
-	if backoffSeconds > 0 {
-		e.backoffSeconds = backoffSeconds
+	return e.stellar
+}
+
+func (e *Engine) signerFor(ctx context.Context) stellar.Signer {
+	if e.signerResolver != nil {
+		if signer := e.signerResolver.SignerForMode(ctx); signer != nil {
+			return signer
+		}
 	}
+	return e.signer
 }
 
 func (e *Engine) SubmitTransfer(ctx context.Context, txID string) error {
@@ -79,6 +92,10 @@ func (e *Engine) SubmitTransfer(ctx context.Context, txID string) error {
 	if err != nil {
 		return fmt.Errorf("load transaction: %w", err)
 	}
+	if tx.TenantID != nil {
+		ctx = tenant.WithID(ctx, *tx.TenantID)
+	}
+	ctx = tenant.WithMode(ctx, tx.Mode)
 
 	// Atomically claim the transaction before doing any work. This is what
 	// makes concurrent workers (duplicate queue delivery, overlapping
@@ -104,7 +121,7 @@ func (e *Engine) SubmitTransfer(ctx context.Context, txID string) error {
 		return fmt.Errorf("load source wallet: %w", err)
 	}
 
-	srcAccount, err := stellar.LoadAccountWithContext(ctx, e.stellar, srcWallet.PublicKey)
+	srcAccount, err := stellar.LoadAccountWithContext(ctx, e.client(ctx), srcWallet.PublicKey)
 	if err != nil {
 		return fmt.Errorf("load stellar account: %w", err)
 	}
@@ -140,11 +157,15 @@ func (e *Engine) SubmitTransfer(ctx context.Context, txID string) error {
 	}
 
 	var memo txnbuild.Memo
-	if tx.Reference != "" {
-		if len(tx.Reference) <= 28 {
-			memo = txnbuild.MemoText(tx.Reference)
+	memoSource := tx.Reference
+	if memoSource == "" && tx.ExternalReference != nil {
+		memoSource = *tx.ExternalReference
+	}
+	if memoSource != "" {
+		if len(memoSource) <= 28 {
+			memo = txnbuild.MemoText(memoSource)
 		} else {
-			h := sha256.Sum256([]byte(tx.Reference))
+			h := sha256.Sum256([]byte(memoSource))
 			var memoHash txnbuild.MemoHash
 			copy(memoHash[:], h[:])
 			memo = memoHash
@@ -170,12 +191,12 @@ func (e *Engine) SubmitTransfer(ctx context.Context, txID string) error {
 		return fmt.Errorf("decode encrypted secret: %w", err)
 	}
 
-	stellarTx, err = e.signer.Sign(stellarTx, string(encryptedSecret))
+	stellarTx, err = e.signerFor(ctx).Sign(stellarTx, string(encryptedSecret))
 	if err != nil {
 		return fmt.Errorf("sign transaction: %w", err)
 	}
 
-	txHash, err := stellarTx.HashHex(e.networkPassphrase())
+	txHash, err := stellarTx.HashHex(e.networkPassphraseFor(ctx))
 	if err != nil {
 		return fmt.Errorf("compute transaction hash: %w", err)
 	}
@@ -197,7 +218,7 @@ func (e *Engine) SubmitTransfer(ctx context.Context, txID string) error {
 		e.finalizeConfirmed(ctx, tx, txID, txHash, srcWallet, dstWallet)
 		return nil
 
-	case outcome.ambiguous:
+	case outcome.class != stellar.SubmitDefinite:
 		// The network result is unknown — do not mark this failed. Try one
 		// immediate lookup of this exact hash on Horizon; if that's also
 		// inconclusive, leave the transaction in `submitted` (hash already
@@ -257,7 +278,7 @@ func (e *Engine) finalizeConfirmed(ctx context.Context, tx *domain.Transaction, 
 // `submitted` and is left for the periodic reconciliation sweep, which
 // performs this exact same lookup on a schedule until it resolves.
 func (e *Engine) tryResolveAmbiguous(ctx context.Context, tx *domain.Transaction, txID, txHash string, srcWallet, dstWallet *domain.Wallet) bool {
-	horizonTx, err := e.stellar.TransactionDetail(txHash)
+	horizonTx, err := e.client(ctx).TransactionDetail(txHash)
 	if err != nil {
 		return false
 	}
@@ -288,7 +309,10 @@ func (e *Engine) buildAsset(code string) (txnbuild.Asset, error) {
 	return txnbuild.CreditAsset{Code: code, Issuer: issuer}, nil
 }
 
-func (e *Engine) networkPassphrase() string {
+func (e *Engine) networkPassphraseFor(ctx context.Context) string {
+	if mode, ok := tenant.ModeFromContext(ctx); ok && mode == domain.ModeTest {
+		return stellarnet.TestNetworkPassphrase
+	}
 	if e.network == "mainnet" || e.network == "public" {
 		return stellarnet.PublicNetworkPassphrase
 	}
@@ -303,7 +327,7 @@ func (e *Engine) networkPassphrase() string {
 type submitOutcome struct {
 	hash      string
 	confirmed bool
-	ambiguous bool
+	class     stellar.SubmitClass
 	err       error
 }
 
@@ -316,78 +340,38 @@ type submitOutcome struct {
 // produce a second on-chain payment.
 func (e *Engine) submitWithRetry(ctx context.Context, tx *txnbuild.Transaction) submitOutcome {
 	var lastErr error
-	ambiguous := true
-	maxAtt := e.maxAttempts
-	if maxAtt <= 0 {
-		maxAtt = 3
-	}
-	backoff := e.backoffSeconds
-	if backoff <= 0 {
-		backoff = 2
-	}
-	for attempt := 0; attempt < maxAtt; attempt++ {
+	const maxAttempts = 3
+	for attempt := 0; attempt < maxAttempts; attempt++ {
 		if attempt > 0 {
 			select {
 			case <-ctx.Done():
-				return submitOutcome{ambiguous: true, err: ctx.Err()}
-			case <-time.After(time.Duration(attempt) * time.Duration(backoff) * time.Second):
+				return submitOutcome{class: stellar.ClassifySubmitError(ctx.Err()), err: ctx.Err()}
+			case <-time.After(time.Duration(attempt*2) * time.Second):
 			}
 		}
 
-		resp, err := stellar.SubmitTransactionWithContext(ctx, e.stellar, tx)
+		resp, err := stellar.SubmitTransactionWithContext(ctx, e.client(ctx), tx)
 		if err == nil {
 			return submitOutcome{hash: resp.Hash, confirmed: true}
 		}
 
 		lastErr = err
-		if !isRetryable(err) {
-			ambiguous = false
-			break
+		class := stellar.ClassifySubmitError(err)
+		if class == stellar.SubmitDefinite {
+			return submitOutcome{class: class, err: lastErr}
+		}
+		if attempt == maxAttempts-1 {
+			return submitOutcome{class: class, err: lastErr}
 		}
 	}
-	return submitOutcome{ambiguous: ambiguous, err: lastErr}
-}
-
-func isRetryable(err error) bool {
-	if err == nil {
-		return false
-	}
-	if errors.Is(err, ErrRetryableRateLimit) || errors.Is(err, ErrRetryableService) || errors.Is(err, ErrRetryableTimeout) {
-		return true
-	}
-	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
-		return true
-	}
-	// A transport-level failure (dial timeout, connection reset, TLS error)
-	// leaves the on-chain outcome unknown: Horizon may have applied the
-	// transaction even though we never saw the response. Those errors do not
-	// always arrive as *horizonclient.Error, so recognise the net.Error
-	// interface and the usual 5xx/timeout wording explicitly.
-	var netErr net.Error
-	if errors.As(err, &netErr) && (netErr.Timeout() || netErr.Temporary()) {
-		return true
-	}
-	var errCode interface{ HTTPStatus() int }
-	if errors.As(err, &errCode) {
-		status := errCode.HTTPStatus()
-		if status == 429 || status >= 500 {
-			return true
-		}
-	}
-	msg := strings.ToLower(err.Error())
-	for _, fragment := range []string{"timeout", "timed out", "connection reset", "connection refused", "unexpected eof", "unavailable", "503", "502", "504"} {
-		if strings.Contains(msg, fragment) {
-			return true
-		}
-	}
-	return false
+	return submitOutcome{class: stellar.SubmitDefinite, err: lastErr}
 }
 
 func (e *Engine) syncWalletBalances(ctx context.Context, w *domain.Wallet) {
 	if w == nil {
 		return
 	}
-	if acct, err := stellar.LoadAccountWithContext(ctx, e.stellar, w.PublicKey); err == nil {
+	if acct, err := stellar.LoadAccountWithContext(ctx, e.client(ctx), w.PublicKey); err == nil {
 		for _, b := range acct.Balances {
 			code := b.Code
 			if code == "" {

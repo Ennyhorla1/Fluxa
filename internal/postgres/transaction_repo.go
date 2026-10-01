@@ -7,40 +7,79 @@ import (
 	"time"
 
 	"github.com/fluxa/fluxa/internal/domain"
-	"github.com/fluxa/fluxa/internal/reconcile"
 	"github.com/fluxa/fluxa/internal/tenant"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/shopspring/decimal"
 )
 
 type TransactionRepo struct {
-	db DB
+	db      DB
+	primary DB
 }
 
 func NewTransactionRepo(db DB) *TransactionRepo {
 	return &TransactionRepo{db: db}
 }
 
+func (r *TransactionRepo) WithPrimary(primary DB) *TransactionRepo {
+	r.primary = primary
+	return r
+}
+
+func (r *TransactionRepo) readDB() DB {
+	if r.primary != nil {
+		return r.primary
+	}
+	return r.db
+}
+
+func mapTransactionInsertError(err error) error {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == "23505" &&
+		(pgErr.ConstraintName == "uq_transactions_idempotency_record" || pgErr.ConstraintName == "uq_transactions_mode_tx_hash") {
+		return fmt.Errorf("%w: %v", domain.ErrConcurrentUpdate, err)
+	}
+	return err
+}
+
+func transactionMode(ctx context.Context) domain.Mode {
+	return tenant.ModeOrDefault(ctx, domain.ModeLive)
+}
+
 func (r *TransactionRepo) Create(ctx context.Context, tx *domain.Transaction) error {
+	if tx.Mode == "" {
+		tx.Mode = transactionMode(ctx)
+	}
 	tID := tenant.IDFromContext(ctx)
 	if tID != "" {
 		tx.TenantID = &tID
 	}
+	if tx.Tags == nil {
+		tx.Tags = []string{}
+	}
 	_, err := r.db.Exec(ctx,
-		`INSERT INTO transactions (id, tx_hash, type, status, from_wallet, to_wallet, asset, amount, fee, fee_bps, tenant_id, created_at, requeue_count, reconciled_at, fiat_rail, fiat_provider_ref, fiat_status, local_currency, local_amount, batch_id, reference, idempotency_key)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)`,
+		`INSERT INTO transactions (
+			id, tx_hash, type, status, from_wallet, to_wallet, asset, amount, fee, fee_bps,
+			tenant_id, mode, created_at, requeue_count, reconciled_at,
+			fiat_rail, fiat_provider_ref, fiat_status, local_currency, local_amount,
+			batch_id, reference, external_reference, tags, idempotency_key, failure_reason, failure_message
+		 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27)`,
 		tx.ID, nullableString(tx.TxHash), tx.Type, tx.Status,
 		nullableString(tx.FromWallet), nullableString(tx.ToWallet),
 		tx.Asset, tx.Amount.String(), tx.Fee.String(), nullableFeeBps(tx.FeeBps),
-		nullableUUID(tx.TenantID), tx.CreatedAt,
+		nullableUUID(tx.TenantID), tx.Mode, tx.CreatedAt,
 		tx.RequeueCount, nullableTime(tx.ReconciledAt),
 		nullableStringPtr(tx.FiatRail), nullableStringPtr(tx.FiatProviderRef),
 		nullableStringPtr(tx.FiatStatus), nullableStringPtr(tx.LocalCurrency),
 		nullableDecimalPtr(tx.LocalAmount),
-		nullableUUID(tx.BatchID), nullableString(tx.Reference), nullableString(tx.IdempotencyKey),
+		nullableUUID(tx.BatchID), nullableString(tx.Reference),
+		nullableStringPtr(tx.ExternalReference), tx.Tags,
+		nullableString(tx.IdempotencyKey),
+		nullableString(tx.FailureReason), nullableString(tx.FailureMessage),
 	)
 	if err != nil {
-		return fmt.Errorf("insert transaction: %w", err)
+		return fmt.Errorf("insert transaction: %w", mapTransactionInsertError(err))
 	}
 	return nil
 }
@@ -51,8 +90,8 @@ func (r *TransactionRepo) Create(ctx context.Context, tx *domain.Transaction) er
 func (r *TransactionRepo) ExistsByTxHash(ctx context.Context, txHash string) (bool, error) {
 	var exists bool
 	err := r.db.QueryRow(ctx,
-		`SELECT EXISTS(SELECT 1 FROM transactions WHERE tx_hash = $1)`,
-		txHash,
+		`SELECT EXISTS(SELECT 1 FROM transactions WHERE tx_hash = $1 AND mode = $2)`,
+		txHash, transactionMode(ctx),
 	).Scan(&exists)
 	if err != nil {
 		return false, fmt.Errorf("check transaction exists by hash: %w", err)
@@ -67,28 +106,35 @@ func (r *TransactionRepo) GetByID(ctx context.Context, id string) (*domain.Trans
 	var feeBps *int
 	var tenantID *string
 	var batchID *string
+	var idempotencyRecordID *string
 	var reference string
+	var externalRef *string
+	var tags []string
+	var failureReason, failureMessage string
 
-	tID := tenant.IDFromContext(ctx)
+	mode := transactionMode(ctx)
 	query := `SELECT id, COALESCE(tx_hash,''), type, status,
 		        COALESCE(from_wallet::text,''), COALESCE(to_wallet::text,''),
-		        asset, amount, COALESCE(fee,'0'), fee_bps, tenant_id, created_at,
+		        asset, amount, COALESCE(fee,'0'), fee_bps, tenant_id, mode, created_at,
 		        COALESCE(requeue_count, 0), reconciled_at,
 		        fiat_rail, fiat_provider_ref, fiat_status, local_currency, local_amount,
-		        batch_id, COALESCE(reference,'')
-		 FROM transactions WHERE id = $1`
-	args := []interface{}{id}
+		        batch_id, COALESCE(reference,''), external_reference, COALESCE(tags, '{}'),
+		        COALESCE(failure_reason,''), COALESCE(failure_message,''), idempotency_record_id
+		 FROM transactions WHERE id = $1 AND mode = $2`
+	args := []interface{}{id, mode}
+
+	tID := tenant.IDFromContext(ctx)
 	if tID != "" {
-		query += ` AND tenant_id = $2`
+		query += ` AND tenant_id = $3`
 		args = append(args, tID)
 	}
 
-	err := r.db.QueryRow(ctx, query, args...).Scan(&tx.ID, &tx.TxHash, &tx.Type, &tx.Status,
+	err := r.readDB().QueryRow(ctx, query, args...).Scan(&tx.ID, &tx.TxHash, &tx.Type, &tx.Status,
 		&tx.FromWallet, &tx.ToWallet,
-		&tx.Asset, &amount, &fee, &feeBps, &tenantID, &tx.CreatedAt,
+		&tx.Asset, &amount, &fee, &feeBps, &tenantID, &tx.Mode, &tx.CreatedAt,
 		&tx.RequeueCount, &tx.ReconciledAt,
 		&tx.FiatRail, &tx.FiatProviderRef, &tx.FiatStatus, &tx.LocalCurrency, &localAmt,
-		&batchID, &reference)
+		&batchID, &reference, &externalRef, &tags, &failureReason, &failureMessage, &idempotencyRecordID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, domain.ErrTransactionNotFound
@@ -101,46 +147,70 @@ func (r *TransactionRepo) GetByID(ctx context.Context, id string) (*domain.Trans
 		tx.FeeBps = *feeBps
 	}
 	tx.TenantID = tenantID
+	tx.IdempotencyRecordID = idempotencyRecordID
 	if localAmt != nil {
 		d, _ := decimal.NewFromString(*localAmt)
 		tx.LocalAmount = &d
 	}
 	tx.BatchID = batchID
 	tx.Reference = reference
+	tx.ExternalReference = externalRef
+	tx.Tags = tags
+	tx.FailureReason = failureReason
+	tx.FailureMessage = failureMessage
 	return tx, nil
 }
 
 // GetByIdempotencyKey returns the transaction previously created for this
-// org/idempotency-key pair, used by the transfer service to guarantee
-// exactly-once transfer creation for a given key.
+// tenant/mode/idempotency-key tuple.
 func (r *TransactionRepo) GetByIdempotencyKey(ctx context.Context, orgID, idempotencyKey string) (*domain.Transaction, error) {
+	mode := transactionMode(ctx)
+	tx, err := r.getIdempotentTransaction(ctx, "idempotency_key = $1", idempotencyKey, mode, orgID)
+	if tx != nil {
+		tx.IdempotencyKey = idempotencyKey
+	}
+	return tx, err
+}
+
+// GetByIdempotencyRecordID returns the transaction linked to the exact
+// idempotency generation. This is the recovery fence used after a process dies
+// after inserting a transfer but before completing the idempotency record.
+func (r *TransactionRepo) GetByIdempotencyRecordID(ctx context.Context, recordID string) (*domain.Transaction, error) {
+	return r.getIdempotentTransaction(ctx, "idempotency_record_id = $1", recordID, transactionMode(ctx), tenant.IDFromContext(ctx))
+}
+
+func (r *TransactionRepo) getIdempotentTransaction(ctx context.Context, predicate, value string, mode domain.Mode, orgID string) (*domain.Transaction, error) {
 	tx := &domain.Transaction{}
 	var amount, fee string
 	var feeBps *int
-	var tenantID *string
-	var batchID *string
+	var tenantID, batchID, recordID *string
 	var reference string
-
+	var externalRef *string
+	var tags []string
+	var failureReason, failureMessage, idempotencyKey string
 	query := `SELECT id, COALESCE(tx_hash,''), type, status,
 		        COALESCE(from_wallet::text,''), COALESCE(to_wallet::text,''),
-		        asset, amount, COALESCE(fee,'0'), fee_bps, tenant_id, created_at,
-		        COALESCE(requeue_count, 0), reconciled_at, batch_id, COALESCE(reference,'')
-		 FROM transactions WHERE idempotency_key = $1`
-	args := []interface{}{idempotencyKey}
+		        asset, amount, COALESCE(fee,'0'), fee_bps, tenant_id, mode, created_at,
+		        COALESCE(requeue_count, 0), reconciled_at, batch_id, COALESCE(reference,''),
+		        external_reference, COALESCE(tags, '{}'),
+		        COALESCE(failure_reason,''), COALESCE(failure_message,''),
+		        COALESCE(idempotency_key,''), idempotency_record_id
+		 FROM transactions WHERE ` + predicate + ` AND mode = $2`
+	args := []interface{}{value, mode}
 	if orgID != "" {
-		query += ` AND tenant_id = $2`
+		query += ` AND tenant_id = $3`
 		args = append(args, orgID)
 	}
-
-	err := r.db.QueryRow(ctx, query, args...).Scan(&tx.ID, &tx.TxHash, &tx.Type, &tx.Status,
-		&tx.FromWallet, &tx.ToWallet,
-		&tx.Asset, &amount, &fee, &feeBps, &tenantID, &tx.CreatedAt,
-		&tx.RequeueCount, &tx.ReconciledAt, &batchID, &reference)
+	err := r.readDB().QueryRow(ctx, query, args...).Scan(&tx.ID, &tx.TxHash, &tx.Type, &tx.Status,
+		&tx.FromWallet, &tx.ToWallet, &tx.Asset, &amount, &fee, &feeBps, &tenantID, &tx.Mode,
+		&tx.CreatedAt, &tx.RequeueCount, &tx.ReconciledAt, &batchID, &reference,
+		&externalRef, &tags,
+		&failureReason, &failureMessage, &idempotencyKey, &recordID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, domain.ErrTransactionNotFound
+	}
 	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, domain.ErrTransactionNotFound
-		}
-		return nil, fmt.Errorf("get transaction by idempotency key: %w", err)
+		return nil, fmt.Errorf("get transaction by idempotency reference: %w", err)
 	}
 	tx.Amount, _ = decimal.NewFromString(amount)
 	tx.Fee, _ = decimal.NewFromString(fee)
@@ -150,19 +220,17 @@ func (r *TransactionRepo) GetByIdempotencyKey(ctx context.Context, orgID, idempo
 	tx.TenantID = tenantID
 	tx.BatchID = batchID
 	tx.Reference = reference
+	tx.ExternalReference = externalRef
+	tx.Tags = tags
+	tx.FailureReason = failureReason
+	tx.FailureMessage = failureMessage
 	tx.IdempotencyKey = idempotencyKey
+	tx.IdempotencyRecordID = recordID
 	return tx, nil
 }
 
 // ClaimForSubmission atomically transitions a transaction from pending to
-// submitted. The WHERE clause makes this a single conditional UPDATE:
-// concurrent callers claiming the same id race on the same row, and only
-// one can ever win it. Deliberately strict (pending only, not also
-// submitted-but-unhashed): a row already sitting in `submitted` might be
-// actively owned by another in-flight worker that just hasn't written its
-// hash yet, so it must never be silently reclaimed here — only the
-// time-gated stuck-transaction recovery path (ResetStuckSubmittedToPending,
-// gated on age) may return such a row to pending.
+// submitted.
 func (r *TransactionRepo) ClaimForSubmission(ctx context.Context, id string) error {
 	tag, err := r.db.Exec(ctx,
 		`UPDATE transactions SET status = 'submitted' WHERE id = $1 AND status = 'pending'`,
@@ -177,14 +245,42 @@ func (r *TransactionRepo) ClaimForSubmission(ctx context.Context, id string) err
 	return nil
 }
 
+// RetryFailedTransaction atomically reopens only a definitively failed
+// transfer, scoped to the authenticated tenant and environment. Clearing the
+// prior hash prevents a rejected attempt from being mistaken for this retry.
+func (r *TransactionRepo) RetryFailedTransaction(ctx context.Context, id string) error {
+	tenantID := tenant.IDFromContext(ctx)
+	if tenantID == "" {
+		return domain.ErrForbidden
+	}
+	mode, ok := tenant.ModeFromContext(ctx)
+	if !ok {
+		return domain.ErrForbidden
+	}
+	tx, err := r.GetByID(ctx, id)
+	if err != nil {
+		return err
+	}
+	if tx.Status != domain.StatusFailed {
+		return fmt.Errorf("retry failed transaction: %w", domain.ErrConcurrentUpdate)
+	}
+	tag, err := r.db.Exec(ctx,
+		`UPDATE transactions
+		 SET status = 'pending', tx_hash = NULL, failure_reason = '', failure_message = ''
+		 WHERE id = $1 AND tenant_id = $2 AND mode = $3 AND status = 'failed'`,
+		id, tenantID, mode,
+	)
+	if err != nil {
+		return fmt.Errorf("retry failed transaction: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("retry failed transaction: %w", domain.ErrConcurrentUpdate)
+	}
+	return nil
+}
+
 // ResetStuckSubmittedToPending recovers a transaction that was claimed
-// (status=submitted) but never got a tx_hash recorded — the worker that
-// claimed it crashed before reaching the network, so nothing may have been
-// submitted. Gated on age (olderThan) so an in-flight worker still within
-// its normal processing window is never touched; only used by the
-// reconciliation sweep's stuck-transaction recovery, immediately before
-// re-enqueueing. A submitted transaction that does have a hash is
-// untouched by this — that one is only ever resolved by hash lookup.
+// (status=submitted) but never got a tx_hash recorded.
 func (r *TransactionRepo) ResetStuckSubmittedToPending(ctx context.Context, id string, olderThan time.Duration) error {
 	tag, err := r.db.Exec(ctx,
 		`UPDATE transactions
@@ -208,11 +304,11 @@ func (r *TransactionRepo) UpdateStatus(ctx context.Context, id string, status do
 	tID := tenant.IDFromContext(ctx)
 	query := `UPDATE transactions
 		 SET status = $2, tx_hash = COALESCE(NULLIF($3, ''), tx_hash)
-		 WHERE id = $1
+		 WHERE id = $1 AND mode = $4
 		   AND status != 'confirmed'`
-	args := []interface{}{id, status, txHash}
+	args := []interface{}{id, status, txHash, transactionMode(ctx)}
 	if tID != "" {
-		query += ` AND tenant_id = $4`
+		query += ` AND tenant_id = $5`
 		args = append(args, tID)
 	}
 
@@ -228,19 +324,20 @@ func (r *TransactionRepo) ListByWallet(ctx context.Context, walletID string, lim
 
 	query := `SELECT id, COALESCE(tx_hash,''), type, status,
 		        COALESCE(from_wallet::text,''), COALESCE(to_wallet::text,''),
-		        asset, amount, COALESCE(fee,'0'), fee_bps, tenant_id, created_at,
+		        asset, amount, COALESCE(fee,'0'), fee_bps, tenant_id, mode, created_at,
 		        COALESCE(requeue_count, 0), reconciled_at,
 		        fiat_rail, fiat_provider_ref, fiat_status, local_currency, local_amount,
-		        batch_id, COALESCE(reference,'')
+		        batch_id, COALESCE(reference,''), external_reference, COALESCE(tags, '{}'),
+		        COALESCE(failure_reason,''), COALESCE(failure_message,'')
 		 FROM transactions
-		 WHERE (from_wallet = $1 OR to_wallet = $1)`
-	args := []interface{}{walletID}
+		 WHERE (from_wallet = $1 OR to_wallet = $1) AND mode = $2`
+	args := []interface{}{walletID, transactionMode(ctx)}
 
 	if tID != "" {
-		query += ` AND tenant_id = $2 ORDER BY created_at DESC LIMIT $3 OFFSET $4`
+		query += ` AND tenant_id = $3 ORDER BY created_at DESC LIMIT $4 OFFSET $5`
 		args = append(args, tID, limit, offset)
 	} else {
-		query += ` ORDER BY created_at DESC LIMIT $2 OFFSET $3`
+		query += ` ORDER BY created_at DESC LIMIT $3 OFFSET $4`
 		args = append(args, limit, offset)
 	}
 
@@ -263,10 +360,11 @@ func (r *TransactionRepo) ListByBatch(ctx context.Context, batchID string) ([]*d
 
 	query := `SELECT id, COALESCE(tx_hash,''), type, status,
 		        COALESCE(from_wallet::text,''), COALESCE(to_wallet::text,''),
-		        asset, amount, COALESCE(fee,'0'), fee_bps, tenant_id, created_at,
+		        asset, amount, COALESCE(fee,'0'), fee_bps, tenant_id, mode, created_at,
 		        COALESCE(requeue_count, 0), reconciled_at,
 		        fiat_rail, fiat_provider_ref, fiat_status, local_currency, local_amount,
-		        batch_id, COALESCE(reference,'')
+		        batch_id, COALESCE(reference,''), external_reference, COALESCE(tags, '{}'),
+		        COALESCE(failure_reason,''), COALESCE(failure_message,'')
 		 FROM transactions WHERE batch_id = $1`
 	args := []interface{}{batchID}
 	if tID != "" {
@@ -288,6 +386,63 @@ func (r *TransactionRepo) ListByBatch(ctx context.Context, batchID string) ([]*d
 	return txs, rows.Err()
 }
 
+func (r *TransactionRepo) ListWithFilter(ctx context.Context, filter domain.TransactionFilter) ([]*domain.Transaction, error) {
+	tID := tenant.IDFromContext(ctx)
+	mode := transactionMode(ctx)
+
+	query := `SELECT id, COALESCE(tx_hash,''), type, status,
+		        COALESCE(from_wallet::text,''), COALESCE(to_wallet::text,''),
+		        asset, amount, COALESCE(fee,'0'), fee_bps, tenant_id, mode, created_at,
+		        COALESCE(requeue_count, 0), reconciled_at,
+		        fiat_rail, fiat_provider_ref, fiat_status, local_currency, local_amount,
+		        batch_id, COALESCE(reference,''), external_reference, COALESCE(tags, '{}'),
+		        COALESCE(failure_reason,''), COALESCE(failure_message,'')
+		 FROM transactions WHERE mode = $1`
+	args := []interface{}{mode}
+	idx := 2
+
+	if tID != "" {
+		query += fmt.Sprintf(" AND tenant_id = $%d", idx)
+		args = append(args, tID)
+		idx++
+	}
+	if filter.WalletID != "" {
+		query += fmt.Sprintf(" AND (from_wallet = $%d OR to_wallet = $%d)", idx, idx)
+		args = append(args, filter.WalletID)
+		idx++
+	}
+	if filter.ExternalReference != "" {
+		query += fmt.Sprintf(" AND external_reference = $%d", idx)
+		args = append(args, filter.ExternalReference)
+		idx++
+	}
+	if filter.Tag != "" {
+		query += fmt.Sprintf(" AND $%d = ANY(tags)", idx)
+		args = append(args, filter.Tag)
+		idx++
+	}
+
+	limit := filter.Limit
+	if limit <= 0 || limit > 100 {
+		limit = 50
+	}
+	offset := filter.Offset
+	if offset < 0 {
+		offset = 0
+	}
+
+	query += fmt.Sprintf(" ORDER BY created_at DESC LIMIT $%d OFFSET $%d", idx, idx+1)
+	args = append(args, limit, offset)
+
+	rows, err := r.db.Query(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list transactions filtered: %w", err)
+	}
+	defer rows.Close()
+
+	return scanTransactions(rows)
+}
+
 func scanTransactions(rows pgx.Rows) ([]*domain.Transaction, error) {
 	var txs []*domain.Transaction
 	for rows.Next() {
@@ -297,12 +452,15 @@ func scanTransactions(rows pgx.Rows) ([]*domain.Transaction, error) {
 		var feeBps *int
 		var tenantID, batchID *string
 		var reference string
+		var externalRef *string
+		var tags []string
+		var failureReason, failureMessage string
 		if err := rows.Scan(&tx.ID, &tx.TxHash, &tx.Type, &tx.Status,
 			&tx.FromWallet, &tx.ToWallet,
-			&tx.Asset, &amount, &fee, &feeBps, &tenantID, &tx.CreatedAt,
+			&tx.Asset, &amount, &fee, &feeBps, &tenantID, &tx.Mode, &tx.CreatedAt,
 			&tx.RequeueCount, &tx.ReconciledAt,
 			&tx.FiatRail, &tx.FiatProviderRef, &tx.FiatStatus, &tx.LocalCurrency, &localAmt,
-			&batchID, &reference); err != nil {
+			&batchID, &reference, &externalRef, &tags, &failureReason, &failureMessage); err != nil {
 			return nil, err
 		}
 		tx.Amount, _ = decimal.NewFromString(amount)
@@ -317,6 +475,10 @@ func scanTransactions(rows pgx.Rows) ([]*domain.Transaction, error) {
 		}
 		tx.BatchID = batchID
 		tx.Reference = reference
+		tx.ExternalReference = externalRef
+		tx.Tags = tags
+		tx.FailureReason = failureReason
+		tx.FailureMessage = failureMessage
 		txs = append(txs, tx)
 	}
 	return txs, nil
@@ -414,12 +576,7 @@ func (r *TransactionRepo) GetConfirmedTxesForReconciliation(ctx context.Context,
 }
 
 // GetStuckPendingTxes returns transactions older than the specified duration
-// that never made it to the network: still pending (never claimed), or
-// submitted with no tx_hash recorded (a worker claimed it but crashed
-// before it could build/sign/submit). Both are safe to re-enqueue — neither
-// has a hash to look up on Horizon, so nothing may have reached the network.
-// A submitted transaction that does have a hash is deliberately excluded:
-// that one is only ever resolved by the hash-based reconciliation path.
+// that never made it to the network.
 func (r *TransactionRepo) GetStuckPendingTxes(ctx context.Context, olderThan time.Duration, limit int) ([]*domain.Transaction, error) {
 	rows, err := r.db.Query(ctx,
 		`WITH claimed AS (
@@ -467,8 +624,7 @@ func (r *TransactionRepo) GetStuckPendingTxes(ctx context.Context, olderThan tim
 	return txs, rows.Err()
 }
 
-// UpdateReconciliationStatus updates the status without the confirmed guard,
-// allowing reconciliation to set reconciliation_failed on previously confirmed txes.
+// UpdateReconciliationStatus updates the status without the confirmed guard.
 func (r *TransactionRepo) UpdateReconciliationStatus(ctx context.Context, id string, status domain.TransactionStatus) error {
 	tID := tenant.IDFromContext(ctx)
 	query := `UPDATE transactions SET status = $2 WHERE id = $1 AND status != $2`
@@ -515,22 +671,47 @@ func (r *TransactionRepo) UpdateReconciledAt(ctx context.Context, id string) err
 }
 
 // WriteAuditLog inserts a row into the ledger_audit_log table.
-func (r *TransactionRepo) WriteAuditLog(ctx context.Context, entry *reconcile.AuditLogEntry) error {
-	_, err := r.db.Exec(ctx,
-		`INSERT INTO ledger_audit_log (id, tx_id, stellar_hash, checked_at, horizon_status, amount_verified, asset_verified, fee_verified, outcome, details)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
-		entry.ID, entry.TxID, entry.StellarHash, entry.CheckedAt,
-		entry.HorizonStatus, entry.AmountVerified, entry.AssetVerified, entry.FeeVerified,
-		entry.Outcome, entry.Details,
-	)
+func (r *TransactionRepo) WriteAuditLog(ctx context.Context, entry *domain.AuditLogEntry) error {
+	err := RunInTx(ctx, r.db, func(txCtx context.Context) error {
+		db := TxFromContext(txCtx, r.db)
+		_, err := db.Exec(txCtx,
+			`INSERT INTO ledger_audit_log (id, tx_id, stellar_hash, checked_at, horizon_status, amount_verified, asset_verified, fee_verified, outcome, details)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+			entry.ID, entry.TxID, entry.StellarHash, entry.CheckedAt,
+			entry.HorizonStatus, entry.AmountVerified, entry.AssetVerified, entry.FeeVerified,
+			entry.Outcome, entry.Details,
+		)
+		if err != nil {
+			return fmt.Errorf("write audit log: %w", err)
+		}
+		if entry.Outcome == domain.AuditOK {
+			return nil
+		}
+		category := domain.ReconciliationDiscrepancyCategory(entry)
+		_, err = db.Exec(txCtx,
+			`INSERT INTO reconciliation_discrepancies
+			 (tenant_id, transaction_id, category, last_audit_log_id)
+			 SELECT tenant_id, id, $2, $3 FROM transactions WHERE id = $1 AND tenant_id IS NOT NULL
+			 ON CONFLICT (transaction_id, category) DO UPDATE
+			 SET last_audit_log_id = EXCLUDED.last_audit_log_id,
+			     status = CASE WHEN reconciliation_discrepancies.status = 'resolved' THEN 'open' ELSE reconciliation_discrepancies.status END,
+			     resolved_at = CASE WHEN reconciliation_discrepancies.status = 'resolved' THEN NULL ELSE reconciliation_discrepancies.resolved_at END,
+			     updated_at = NOW()`,
+			entry.TxID, category, entry.ID,
+		)
+		if err != nil {
+			return fmt.Errorf("upsert reconciliation discrepancy: %w", err)
+		}
+		return nil
+	})
 	if err != nil {
-		return fmt.Errorf("write audit log: %w", err)
+		return fmt.Errorf("write reconciliation audit result: %w", err)
 	}
 	return nil
 }
 
 // GetDailyReconciliationSummary returns counts grouped by day for the last 7 days.
-func (r *TransactionRepo) GetDailyReconciliationSummary(ctx context.Context, days int) ([]reconcile.DailySummaryRow, error) {
+func (r *TransactionRepo) GetDailyReconciliationSummary(ctx context.Context, days int) ([]domain.DailySummaryRow, error) {
 	rows, err := r.db.Query(ctx,
 		`SELECT d::date AS date,
 		        COALESCE(SUM(CASE WHEN outcome = 'ok' THEN 1 ELSE 0 END), 0) AS ok_count,
@@ -547,9 +728,9 @@ func (r *TransactionRepo) GetDailyReconciliationSummary(ctx context.Context, day
 	}
 	defer rows.Close()
 
-	var summary []reconcile.DailySummaryRow
+	var summary []domain.DailySummaryRow
 	for rows.Next() {
-		var row reconcile.DailySummaryRow
+		var row domain.DailySummaryRow
 		if err := rows.Scan(&row.Date, &row.OKCount, &row.MismatchCount, &row.NotFoundCount); err != nil {
 			return nil, err
 		}
@@ -572,25 +753,32 @@ func (r *TransactionRepo) GetPendingStuckCount(ctx context.Context, olderThan ti
 }
 
 // UpsertByTxHash inserts a transaction only if no row with the same tx_hash exists.
-// Returns nil (no-op) when a duplicate is detected, making it safe for concurrent callers.
 func (r *TransactionRepo) UpsertByTxHash(ctx context.Context, tx *domain.Transaction) error {
+	if tx.Mode == "" {
+		tx.Mode = transactionMode(ctx)
+	}
 	tID := tenant.IDFromContext(ctx)
 	if tID != "" {
 		tx.TenantID = &tID
 	}
+	if tx.Tags == nil {
+		tx.Tags = []string{}
+	}
 	_, err := r.db.Exec(ctx,
-		`INSERT INTO transactions (id, tx_hash, type, status, from_wallet, to_wallet, asset, amount, fee, fee_bps, tenant_id, created_at, requeue_count, reconciled_at, fiat_rail, fiat_provider_ref, fiat_status, local_currency, local_amount, batch_id, reference, idempotency_key)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
-		 ON CONFLICT (tx_hash) DO NOTHING`,
+		`INSERT INTO transactions (id, tx_hash, type, status, from_wallet, to_wallet, asset, amount, fee, fee_bps, tenant_id, mode, created_at, requeue_count, reconciled_at, fiat_rail, fiat_provider_ref, fiat_status, local_currency, local_amount, batch_id, reference, external_reference, tags, idempotency_key, idempotency_record_id)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26)
+		 ON CONFLICT (mode, tx_hash) WHERE tx_hash IS NOT NULL DO NOTHING`,
 		tx.ID, nullableString(tx.TxHash), tx.Type, tx.Status,
 		nullableString(tx.FromWallet), nullableString(tx.ToWallet),
 		tx.Asset, tx.Amount.String(), tx.Fee.String(), nullableFeeBps(tx.FeeBps),
-		nullableUUID(tx.TenantID), tx.CreatedAt,
+		nullableUUID(tx.TenantID), tx.Mode, tx.CreatedAt,
 		tx.RequeueCount, nullableTime(tx.ReconciledAt),
 		nullableStringPtr(tx.FiatRail), nullableStringPtr(tx.FiatProviderRef),
 		nullableStringPtr(tx.FiatStatus), nullableStringPtr(tx.LocalCurrency),
 		nullableDecimalPtr(tx.LocalAmount),
-		nullableUUID(tx.BatchID), nullableString(tx.Reference), nullableString(tx.IdempotencyKey),
+		nullableUUID(tx.BatchID), nullableString(tx.Reference),
+		nullableStringPtr(tx.ExternalReference), tx.Tags,
+		nullableString(tx.IdempotencyKey), nullableUUID(tx.IdempotencyRecordID),
 	)
 	if err != nil {
 		return fmt.Errorf("upsert transaction by tx_hash: %w", err)
@@ -599,11 +787,7 @@ func (r *TransactionRepo) UpsertByTxHash(ctx context.Context, tx *domain.Transac
 }
 
 // GetPendingTxesForReconciliation returns pending or submitted transactions
-// that have a Stellar tx_hash stored and are older than olderThan —
-// including a transaction whose submission outcome was ambiguous (status
-// 'submitted', hash recorded, but neither confirmed nor failed yet). Uses
-// SELECT FOR UPDATE SKIP LOCKED so concurrent reconciler instances claim
-// disjoint sets of rows without blocking.
+// that have a Stellar tx_hash stored and are older than olderThan.
 func (r *TransactionRepo) GetPendingTxesForReconciliation(ctx context.Context, olderThan time.Duration, limit int) ([]*domain.Transaction, error) {
 	rows, err := r.db.Query(ctx,
 		`WITH claimed AS (
@@ -655,10 +839,7 @@ func (r *TransactionRepo) GetPendingTxesForReconciliation(ctx context.Context, o
 	return txs, nil
 }
 
-// UpdateTxConfirmed transitions a pending or submitted transaction to
-// confirmed. The WHERE guard prevents double-correction if two reconcilers
-// (or a reconciler and the settlement engine itself) race. Returns
-// domain.ErrConcurrentUpdate when the row was already claimed.
+// UpdateTxConfirmed transitions a pending or submitted transaction to confirmed.
 func (r *TransactionRepo) UpdateTxConfirmed(ctx context.Context, id, txHash string) error {
 	tag, err := r.db.Exec(ctx,
 		`UPDATE transactions SET status = 'confirmed', tx_hash = NULLIF($2, '') WHERE id = $1 AND status IN ('pending', 'submitted')`,
@@ -674,9 +855,6 @@ func (r *TransactionRepo) UpdateTxConfirmed(ctx context.Context, id, txHash stri
 }
 
 // UpdateTxFailed transitions a pending or submitted transaction to failed.
-// The WHERE guard prevents double-correction if two reconcilers (or a
-// reconciler and the settlement engine itself) race. Returns
-// domain.ErrConcurrentUpdate when the row was already claimed.
 func (r *TransactionRepo) UpdateTxFailed(ctx context.Context, id string) error {
 	tag, err := r.db.Exec(ctx,
 		`UPDATE transactions SET status = 'failed' WHERE id = $1 AND status IN ('pending', 'submitted')`,
@@ -692,7 +870,7 @@ func (r *TransactionRepo) UpdateTxFailed(ctx context.Context, id string) error {
 }
 
 // WriteReconciliationRun persists a record of a completed reconciliation pass.
-func (r *TransactionRepo) WriteReconciliationRun(ctx context.Context, run *reconcile.ReconciliationRun) error {
+func (r *TransactionRepo) WriteReconciliationRun(ctx context.Context, run *domain.ReconciliationRun) error {
 	_, err := r.db.Exec(ctx,
 		`INSERT INTO reconciliation_runs (id, started_at, completed_at, txs_checked, discrepancies_found, corrections_made)
 		 VALUES ($1, $2, $3, $4, $5, $6)`,
@@ -710,8 +888,8 @@ func (r *TransactionRepo) CountMonthlyTransfersByTenant(ctx context.Context, ten
 
 	var count int
 	err := r.db.QueryRow(ctx,
-		`SELECT COUNT(*) FROM transactions WHERE tenant_id = $1 AND created_at >= $2 AND created_at < $3`,
-		tenantID, startDate, endDate,
+		`SELECT COUNT(*) FROM transactions WHERE tenant_id = $1 AND mode = $2 AND created_at >= $3 AND created_at < $4`,
+		tenantID, transactionMode(ctx), startDate, endDate,
 	).Scan(&count)
 	if err != nil {
 		return 0, fmt.Errorf("count monthly transfers: %w", err)
@@ -719,9 +897,23 @@ func (r *TransactionRepo) CountMonthlyTransfersByTenant(ctx context.Context, ten
 	return count, nil
 }
 
+func (r *TransactionRepo) CountDailyTransfersByTenant(ctx context.Context, tenantID string, date time.Time) (int, error) {
+	startDate := time.Date(date.Year(), date.Month(), date.Day(), 0, 0, 0, 0, time.UTC)
+	endDate := startDate.AddDate(0, 0, 1)
+
+	var count int
+	err := r.db.QueryRow(ctx,
+		`SELECT COUNT(*) FROM transactions WHERE tenant_id = $1 AND mode = $2 AND created_at >= $3 AND created_at < $4`,
+		tenantID, transactionMode(ctx), startDate, endDate,
+	).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("count daily transfers: %w", err)
+	}
+	return count, nil
+}
+
 // CreateWithMonthlyLimit atomically checks the tenant's monthly transfer count
-// and inserts the transaction in a single database transaction. This prevents
-// concurrent requests from exceeding the quota by serializing the count+insert.
+// and inserts the transaction in a single database transaction.
 func (r *TransactionRepo) CreateWithMonthlyLimit(ctx context.Context, tx *domain.Transaction, tenantID string, year int, month time.Month, limit int) error {
 	dbTx, err := r.db.Begin(ctx)
 	if err != nil {
@@ -732,11 +924,6 @@ func (r *TransactionRepo) CreateWithMonthlyLimit(ctx context.Context, tx *domain
 	startDate := time.Date(year, month, 1, 0, 0, 0, 0, time.UTC)
 	endDate := startDate.AddDate(0, 1, 0)
 
-	// Serialize concurrent transfers for this tenant by locking its row first.
-	// The count and the insert must be atomic or two requests can both observe
-	// count == limit-1 and both insert, overshooting the quota. PostgreSQL
-	// rejects FOR UPDATE on an aggregate, so the lock is taken on the tenant
-	// row rather than on the counted rows; it is released on commit/rollback.
 	var locked int
 	err = dbTx.QueryRow(ctx, `SELECT 1 FROM tenants WHERE id = $1 FOR UPDATE`, tenantID).Scan(&locked)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
@@ -745,8 +932,8 @@ func (r *TransactionRepo) CreateWithMonthlyLimit(ctx context.Context, tx *domain
 
 	var count int
 	err = dbTx.QueryRow(ctx,
-		`SELECT COUNT(*) FROM transactions WHERE tenant_id = $1 AND created_at >= $2 AND created_at < $3`,
-		tenantID, startDate, endDate,
+		`SELECT COUNT(*) FROM transactions WHERE tenant_id = $1 AND mode = $2 AND created_at >= $3 AND created_at < $4`,
+		tenantID, transactionMode(ctx), startDate, endDate,
 	).Scan(&count)
 	if err != nil {
 		return fmt.Errorf("count monthly transfers: %w", err)
@@ -756,22 +943,83 @@ func (r *TransactionRepo) CreateWithMonthlyLimit(ctx context.Context, tx *domain
 		return domain.ErrTransferLimitReached
 	}
 
+	if tx.Tags == nil {
+		tx.Tags = []string{}
+	}
 	_, err = dbTx.Exec(ctx,
-		`INSERT INTO transactions (id, tx_hash, type, status, from_wallet, to_wallet, asset, amount, fee, fee_bps, tenant_id, created_at, requeue_count, reconciled_at, batch_id, reference, idempotency_key)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)`,
+		`INSERT INTO transactions (id, tx_hash, type, status, from_wallet, to_wallet, asset, amount, fee, fee_bps, tenant_id, mode, created_at, requeue_count, reconciled_at, batch_id, reference, external_reference, tags, idempotency_key, idempotency_record_id)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)`,
 		tx.ID, nullableString(tx.TxHash), tx.Type, tx.Status,
 		nullableString(tx.FromWallet), nullableString(tx.ToWallet),
 		tx.Asset, tx.Amount.String(), tx.Fee.String(), nullableFeeBps(tx.FeeBps),
-		nullableUUID(tx.TenantID), tx.CreatedAt,
+		nullableUUID(tx.TenantID), transactionMode(ctx), tx.CreatedAt,
 		tx.RequeueCount, nullableTime(tx.ReconciledAt),
-		nullableUUID(tx.BatchID), nullableString(tx.Reference), nullableString(tx.IdempotencyKey),
+		nullableUUID(tx.BatchID), nullableString(tx.Reference),
+		nullableStringPtr(tx.ExternalReference), tx.Tags,
+		nullableString(tx.IdempotencyKey), nullableUUID(tx.IdempotencyRecordID),
 	)
 	if err != nil {
-		return fmt.Errorf("insert transaction: %w", err)
+		return fmt.Errorf("insert transaction: %w", mapTransactionInsertError(err))
 	}
 
 	if err := dbTx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit limit-check tx: %w", err)
+	}
+	return nil
+}
+
+// CreateWithDailyLimit atomically checks the tenant's daily transfer count
+// and inserts the transaction in a single database transaction.
+func (r *TransactionRepo) CreateWithDailyLimit(ctx context.Context, tx *domain.Transaction, tenantID string, date time.Time, limit int) error {
+	dbTx, err := r.db.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin daily limit-check tx: %w", err)
+	}
+	defer dbTx.Rollback(ctx)
+
+	startDate := time.Date(date.Year(), date.Month(), date.Day(), 0, 0, 0, 0, time.UTC)
+	endDate := startDate.AddDate(0, 0, 1)
+
+	var locked int
+	err = dbTx.QueryRow(ctx, `SELECT 1 FROM tenants WHERE id = $1 FOR UPDATE`, tenantID).Scan(&locked)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("lock tenant for daily limit check: %w", err)
+	}
+
+	var count int
+	err = dbTx.QueryRow(ctx,
+		`SELECT COUNT(*) FROM transactions WHERE tenant_id = $1 AND mode = $2 AND created_at >= $3 AND created_at < $4`,
+		tenantID, transactionMode(ctx), startDate, endDate,
+	).Scan(&count)
+	if err != nil {
+		return fmt.Errorf("count daily transfers: %w", err)
+	}
+
+	if count >= limit {
+		return domain.ErrDailyTransferLimitReached
+	}
+
+	if tx.Tags == nil {
+		tx.Tags = []string{}
+	}
+	_, err = dbTx.Exec(ctx,
+		`INSERT INTO transactions (id, tx_hash, type, status, from_wallet, to_wallet, asset, amount, fee, fee_bps, tenant_id, mode, created_at, requeue_count, reconciled_at, batch_id, reference, external_reference, tags, idempotency_key, idempotency_record_id)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)`,
+		tx.ID, nullableString(tx.TxHash), tx.Type, tx.Status,
+		nullableString(tx.FromWallet), nullableString(tx.ToWallet),
+		tx.Asset, tx.Amount.String(), tx.Fee.String(), nullableFeeBps(tx.FeeBps),
+		nullableUUID(tx.TenantID), transactionMode(ctx), tx.CreatedAt,
+		tx.RequeueCount, nullableTime(tx.ReconciledAt),
+		nullableUUID(tx.BatchID), nullableString(tx.Reference),
+		nullableStringPtr(tx.ExternalReference), tx.Tags,
+		nullableString(tx.IdempotencyKey), nullableUUID(tx.IdempotencyRecordID),
+	)
+	if err != nil {
+		return fmt.Errorf("insert transaction: %w", mapTransactionInsertError(err))
+	}
+
+	if err := dbTx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit daily limit-check tx: %w", err)
 	}
 	return nil
 }

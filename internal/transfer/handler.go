@@ -1,7 +1,9 @@
 package transfer
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strconv"
 	"time"
@@ -35,7 +37,9 @@ func (h *Handler) Routes() func(r chi.Router) {
 			post = r.With(h.idem).Post
 		}
 		post("/", h.initiateTransfer)
+		r.Get("/", h.listTransfers)
 		r.Get("/{id}", h.getTransaction)
+		r.Post("/{id}/cancel", h.cancelTransfer)
 	}
 }
 
@@ -46,43 +50,56 @@ func (h *Handler) TransactionRoutes() func(r chi.Router) {
 }
 
 type createTransferRequest struct {
-	FromWalletID string `json:"from_wallet_id" validate:"required,uuid"`
-	ToWalletID   string `json:"to_wallet_id"   validate:"required,uuid"`
-	Asset        string `json:"asset"          validate:"required"`
-	Amount       string `json:"amount"         validate:"required"`
+	FromWalletID      string   `json:"from_wallet_id" validate:"required,uuid"`
+	ToWalletID        string   `json:"to_wallet_id"   validate:"required,uuid"`
+	Asset             string   `json:"asset"          validate:"required"`
+	Amount            string   `json:"amount"         validate:"required"`
+	Reference         string   `json:"reference,omitempty"`
+	ExternalReference *string  `json:"external_reference,omitempty"`
+	Tags              []string `json:"tags,omitempty"`
 }
 
 type transferResponse struct {
-	ID         string `json:"id"`
-	TxHash     string `json:"tx_hash,omitempty"`
-	Type       string `json:"type"`
-	Status     string `json:"status"`
-	FromWallet string `json:"from_wallet_id"`
-	ToWallet   string `json:"to_wallet_id"`
-	Asset      string `json:"asset"`
-	Amount     string `json:"amount"`
-	FeeAmount  string `json:"fee_amount"`
-	NetAmount  string `json:"net_amount"`
-	FeeBps     int    `json:"fee_bps"`
-	Reference  string `json:"reference,omitempty"`
-	CreatedAt  string `json:"created_at"`
+	ID                string   `json:"id"`
+	TxHash            string   `json:"tx_hash,omitempty"`
+	Type              string   `json:"type"`
+	Status            string   `json:"status"`
+	Mode              string   `json:"mode"`
+	FromWallet        string   `json:"from_wallet_id"`
+	ToWallet          string   `json:"to_wallet_id"`
+	Asset             string   `json:"asset"`
+	Amount            string   `json:"amount"`
+	FeeAmount         string   `json:"fee_amount"`
+	NetAmount         string   `json:"net_amount"`
+	FeeBps            int      `json:"fee_bps"`
+	Reference         string   `json:"reference,omitempty"`
+	ExternalReference *string  `json:"external_reference,omitempty"`
+	Tags              []string `json:"tags,omitempty"`
+	FailureReason     string   `json:"failure_reason,omitempty"`
+	FailureMessage    string   `json:"failure_message,omitempty"`
+	CreatedAt         string   `json:"created_at"`
 }
 
 func toTransferResponse(tx *domain.Transaction) transferResponse {
 	return transferResponse{
-		ID:         tx.ID,
-		TxHash:     tx.TxHash,
-		Type:       string(tx.Type),
-		Status:     string(tx.Status),
-		FromWallet: tx.FromWallet,
-		ToWallet:   tx.ToWallet,
-		Asset:      tx.Asset,
-		Amount:     tx.Amount.StringFixed(7),
-		FeeAmount:  tx.Fee.StringFixed(7),
-		NetAmount:  tx.NetAmount().StringFixed(7),
-		FeeBps:     tx.FeeBps,
-		Reference:  tx.Reference,
-		CreatedAt:  tx.CreatedAt.Format(time.RFC3339),
+		ID:                tx.ID,
+		TxHash:            tx.TxHash,
+		Type:              string(tx.Type),
+		Status:            string(tx.Status),
+		Mode:              string(tx.Mode),
+		FromWallet:        tx.FromWallet,
+		ToWallet:          tx.ToWallet,
+		Asset:             tx.Asset,
+		Amount:            tx.Amount.StringFixed(7),
+		FeeAmount:         tx.Fee.StringFixed(7),
+		NetAmount:         tx.NetAmount().StringFixed(7),
+		FeeBps:            tx.FeeBps,
+		Reference:         tx.Reference,
+		ExternalReference: tx.ExternalReference,
+		Tags:              tx.Tags,
+		FailureReason:     tx.FailureReason,
+		FailureMessage:    tx.FailureMessage,
+		CreatedAt:         tx.CreatedAt.Format(time.RFC3339),
 	}
 }
 
@@ -107,13 +124,60 @@ func (h *Handler) initiateTransfer(w http.ResponseWriter, r *http.Request) {
 	if idempotencyKey == "" {
 		idempotencyKey = r.Header.Get("Idempotency-Key")
 	}
-	tx, err := h.svc.InitiateTransferIdempotent(r.Context(), req.FromWalletID, req.ToWalletID, req.Asset, amount, idempotencyKey)
+
+	extended, ok := h.svc.(interface {
+		InitiateTransferExt(context.Context, TransferParams) (*domain.Transaction, error)
+	})
+	if !ok {
+		api.InternalError(w, errors.New("extended transfers are unavailable"))
+		return
+	}
+	tx, err := extended.InitiateTransferExt(r.Context(), TransferParams{
+		FromID:            req.FromWalletID,
+		ToID:              req.ToWalletID,
+		Asset:             req.Asset,
+		Amount:            amount,
+		Reference:         req.Reference,
+		ExternalReference: req.ExternalReference,
+		Tags:              req.Tags,
+		IdempotencyKey:    idempotencyKey,
+	})
 	if err != nil {
 		api.HandleDomainError(w, err)
 		return
 	}
 
 	api.JSON(w, http.StatusAccepted, toTransferResponse(tx))
+}
+
+func (h *Handler) cancelTransfer(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+
+	actor := api.ActorFromContext(r.Context())
+
+	idempotencyKey := r.Header.Get("X-Idempotency-Key")
+	if idempotencyKey == "" {
+		idempotencyKey = r.Header.Get("Idempotency-Key")
+	}
+	if idempotencyKey == "" {
+		api.BadRequest(w, "idempotency key is required")
+		return
+	}
+
+	canceller, ok := h.svc.(interface {
+		CancelTransfer(context.Context, string, string, string) (*domain.Transaction, error)
+	})
+	if !ok {
+		api.InternalError(w, errors.New("transfer cancellation is unavailable"))
+		return
+	}
+	tx, err := canceller.CancelTransfer(r.Context(), id, actor, idempotencyKey)
+	if err != nil {
+		api.HandleDomainError(w, err)
+		return
+	}
+
+	api.JSON(w, http.StatusOK, toTransferResponse(tx))
 }
 
 func (h *Handler) getTransaction(w http.ResponseWriter, r *http.Request) {
@@ -126,17 +190,39 @@ func (h *Handler) getTransaction(w http.ResponseWriter, r *http.Request) {
 	api.JSON(w, http.StatusOK, toTransferResponse(tx))
 }
 
+func (h *Handler) listTransfers(w http.ResponseWriter, r *http.Request) {
+	h.listFiltered(w, r)
+}
+
 func (h *Handler) listTransactions(w http.ResponseWriter, r *http.Request) {
-	walletID := r.URL.Query().Get("wallet_id")
-	if walletID == "" {
-		api.BadRequest(w, "wallet_id query param is required")
-		return
+	h.listFiltered(w, r)
+}
+
+func (h *Handler) listFiltered(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	walletID := q.Get("wallet_id")
+	extRef := q.Get("external_reference")
+	tag := q.Get("tag")
+
+	limit, _ := strconv.Atoi(q.Get("limit"))
+	offset, _ := strconv.Atoi(q.Get("offset"))
+
+	filter := domain.TransactionFilter{
+		WalletID:          walletID,
+		ExternalReference: extRef,
+		Tag:               tag,
+		Limit:             limit,
+		Offset:            offset,
 	}
 
-	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
-
-	txs, err := h.svc.ListTransactions(r.Context(), walletID, limit, offset)
+	filterable, ok := h.svc.(interface {
+		ListTransactionsFiltered(context.Context, domain.TransactionFilter) ([]*domain.Transaction, error)
+	})
+	if !ok {
+		api.InternalError(w, errors.New("filtered transaction listing is unavailable"))
+		return
+	}
+	txs, err := filterable.ListTransactionsFiltered(r.Context(), filter)
 	if err != nil {
 		api.HandleDomainError(w, err)
 		return

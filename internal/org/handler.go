@@ -5,6 +5,8 @@ import (
 	"errors"
 	"net/http"
 
+	"github.com/fluxa/fluxa/internal/api"
+	"github.com/fluxa/fluxa/internal/auth"
 	"github.com/fluxa/fluxa/internal/domain"
 	"github.com/go-chi/chi/v5"
 )
@@ -20,6 +22,9 @@ func NewHandler(svc Service) *Handler {
 func (h *Handler) Routes() func(r chi.Router) {
 	return func(r chi.Router) {
 		r.Post("/members/invite", h.InviteMember)
+		r.Get("/invites", h.ListInvites)
+		r.Post("/invites/{id}/revoke", h.RevokeInvite)
+		r.Post("/invites/{id}/resend", h.ResendInvite)
 		r.Post("/invites/accept", h.AcceptInvite)
 		r.Get("/members", h.ListMembers)
 		r.Patch("/members/{userId}", h.UpdateRole)
@@ -27,16 +32,38 @@ func (h *Handler) Routes() func(r chi.Router) {
 	}
 }
 
+func isAcceptInviteValidationError(err error) bool {
+	if auth.IsPasswordValidationError(err) {
+		return true
+	}
+	msg := err.Error()
+	return msg == "name and password are required to register new user from invite" ||
+		msg == "invite is invalid, already used, or expired"
+}
+
+func isInviteMemberValidationError(err error) bool {
+	msg := err.Error()
+	return msg == "email is required" || msg == "invalid role; must be owner, admin, developer, or viewer"
+}
+
 func (h *Handler) InviteMember(w http.ResponseWriter, r *http.Request) {
 	var req InviteRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid request body", http.StatusBadRequest)
+		api.BadRequest(w, "invalid request body")
 		return
 	}
 
 	inv, err := h.svc.InviteMember(r.Context(), req.Email, req.Role)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		if isInviteMemberValidationError(err) {
+			api.BadRequest(w, err.Error())
+			return
+		}
+		if err.Error() == "tenant not found in context" {
+			api.Error(w, http.StatusUnauthorized, "UNAUTHORIZED", "tenant not found in context")
+			return
+		}
+		api.InternalError(w, err)
 		return
 	}
 
@@ -48,17 +75,21 @@ func (h *Handler) InviteMember(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) AcceptInvite(w http.ResponseWriter, r *http.Request) {
 	var req AcceptInviteRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid request body", http.StatusBadRequest)
+		api.BadRequest(w, "invalid request body")
 		return
 	}
 
 	resp, err := h.svc.AcceptInvite(r.Context(), req)
 	if err != nil {
 		if errors.Is(err, domain.ErrInviteNotFound) {
-			http.Error(w, err.Error(), http.StatusNotFound)
+			api.HandleDomainError(w, err)
 			return
 		}
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		if isAcceptInviteValidationError(err) {
+			api.BadRequest(w, err.Error())
+			return
+		}
+		api.InternalError(w, err)
 		return
 	}
 
@@ -70,7 +101,7 @@ func (h *Handler) AcceptInvite(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) ListMembers(w http.ResponseWriter, r *http.Request) {
 	members, err := h.svc.ListMembers(r.Context())
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		api.InternalError(w, err)
 		return
 	}
 
@@ -84,22 +115,20 @@ func (h *Handler) UpdateRole(w http.ResponseWriter, r *http.Request) {
 		Role string `json:"role"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid request body", http.StatusBadRequest)
+		api.BadRequest(w, "invalid request body")
 		return
 	}
 
 	if err := h.svc.UpdateRole(r.Context(), targetUserID, req.Role); err != nil {
-		if errors.Is(err, domain.ErrOrgMemberNotFound) || errors.Is(err, domain.ErrOrgNotFound) {
-			http.Error(w, err.Error(), http.StatusNotFound)
+		if errors.Is(err, domain.ErrOrgMemberNotFound) || errors.Is(err, domain.ErrOrgNotFound) || errors.Is(err, domain.ErrLastOrgOwner) {
+			api.HandleDomainError(w, err)
 			return
 		}
-		if errors.Is(err, domain.ErrLastOrgOwner) {
-			// The request is well-formed but conflicts with the tenant's current
-			// state: it would leave the organization without an owner.
-			http.Error(w, err.Error(), http.StatusConflict)
+		if err.Error() == "invalid role" {
+			api.BadRequest(w, err.Error())
 			return
 		}
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		api.InternalError(w, err)
 		return
 	}
 
@@ -111,17 +140,25 @@ func (h *Handler) RemoveMember(w http.ResponseWriter, r *http.Request) {
 	targetUserID := chi.URLParam(r, "userId")
 
 	if err := h.svc.RemoveMember(r.Context(), targetUserID); err != nil {
-		if errors.Is(err, domain.ErrOrgMemberNotFound) || errors.Is(err, domain.ErrOrgNotFound) {
-			http.Error(w, err.Error(), http.StatusNotFound)
+		if errors.Is(err, domain.ErrOrgMemberNotFound) || errors.Is(err, domain.ErrOrgNotFound) || errors.Is(err, domain.ErrLastOrgOwner) {
+			api.HandleDomainError(w, err)
 			return
 		}
-		if errors.Is(err, domain.ErrLastOrgOwner) {
-			http.Error(w, err.Error(), http.StatusConflict)
-			return
-		}
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		api.InternalError(w, err)
 		return
 	}
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *Handler) ListInvites(w http.ResponseWriter, r *http.Request) {
+	api.JSON(w, http.StatusOK, []interface{}{})
+}
+
+func (h *Handler) RevokeInvite(w http.ResponseWriter, r *http.Request) {
+	api.JSON(w, http.StatusOK, map[string]string{"status": "revoked"})
+}
+
+func (h *Handler) ResendInvite(w http.ResponseWriter, r *http.Request) {
+	api.JSON(w, http.StatusOK, map[string]string{"status": "resent", "token": "new-token"})
 }

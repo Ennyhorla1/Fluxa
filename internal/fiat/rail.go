@@ -11,6 +11,7 @@ import (
 type (
 	DepositRequest struct {
 		WalletID      string
+		PaymentLinkID string
 		Reference     string
 		FiatAmount    decimal.Decimal
 		FiatCurrency  string
@@ -39,10 +40,17 @@ type (
 )
 
 type Rail interface {
+	// SupportedCurrencies lists the fiat currency codes (upper case) the rail can settle.
+	SupportedCurrencies() []string
 	GetQuote(ctx context.Context, req QuoteRequest) (*FiatQuote, error)
 	Deposit(ctx context.Context, req DepositRequest) (*DepositResponse, error)
 	Withdraw(ctx context.Context, req WithdrawRequest) (*WithdrawResponse, error)
+	// HandleWebhook is the legacy signature-only form used by existing tests.
 	HandleWebhook(ctx context.Context, payload []byte, signature string) (*RailEvent, error)
+	// HandleWebhookWithHeaders passes the full HTTP header map to the provider
+	// so each provider reads its own signature header without the Rail layer
+	// hard-coding header names.
+	HandleWebhookWithHeaders(ctx context.Context, payload []byte, headers http.Header) (*RailEvent, error)
 }
 
 type RailAdapter struct {
@@ -51,6 +59,10 @@ type RailAdapter struct {
 
 func NewRailAdapter(p Provider) *RailAdapter {
 	return &RailAdapter{provider: p}
+}
+
+func (a *RailAdapter) SupportedCurrencies() []string {
+	return a.provider.SupportedCurrencies()
 }
 
 func (a *RailAdapter) GetQuote(ctx context.Context, req QuoteRequest) (*FiatQuote, error) {
@@ -92,5 +104,11 @@ func (a *RailAdapter) HandleWebhook(ctx context.Context, payload []byte, signatu
 	if signature != "" {
 		headers.Set("verif-hash", signature)
 	}
+	return a.provider.HandleWebhook(ctx, payload, headers)
+}
+
+// HandleWebhookWithHeaders passes the full header map directly to the
+// provider so it can read whichever signature header it expects.
+func (a *RailAdapter) HandleWebhookWithHeaders(ctx context.Context, payload []byte, headers http.Header) (*RailEvent, error) {
 	return a.provider.HandleWebhook(ctx, payload, headers)
 }

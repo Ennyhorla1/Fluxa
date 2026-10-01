@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"fmt"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -24,7 +26,6 @@ import (
 	"github.com/fluxa/fluxa/internal/tracing"
 	"github.com/fluxa/fluxa/internal/transfer"
 	"github.com/fluxa/fluxa/internal/treasury"
-	"github.com/fluxa/fluxa/internal/wallet"
 	"github.com/fluxa/fluxa/internal/webhook"
 	"github.com/hibiken/asynq"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -93,7 +94,7 @@ func main() {
 	repoDB := postgres.NewReplicaAwareDB(db, replica)
 
 	walletRepo := postgres.NewWalletRepo(repoDB)
-	txRepo := postgres.NewTransactionRepo(repoDB)
+	txRepo := postgres.NewTransactionRepo(repoDB).WithPrimary(db)
 	feeRepo := postgres.NewFeeRepo(repoDB)
 	webhookRepo := postgres.NewWebhookRepository(repoDB)
 	reconcileRepo := postgres.NewReconcileRepo(repoDB)
@@ -101,18 +102,23 @@ func main() {
 	treasuryRepo := postgres.NewTreasuryRepo(repoDB)
 	complianceRepo := postgres.NewComplianceRepo(repoDB).WithPrimary(db)
 	fiatRepo := postgres.NewFiatRepo(repoDB)
+	idempotencyRepo := postgres.NewIdempotencyRepo(repoDB)
 
-	stellarClient := stellar.NewClient(cfg.StellarHorizonURL, cfg.StellarNetwork, cfg.StellarHorizonTimeout)
-	signer := stellar.NewEnvSigner(cfg.MasterEncryptionKey, cfg.StellarNetwork)
+	stellarClient := stellar.NewClient(cfg.StellarLiveHorizonURL, cfg.StellarLiveNetwork, cfg.StellarHorizonTimeout)
+	testStellarClient := stellar.NewClient(cfg.StellarTestnetHorizonURL, cfg.StellarTestnetNetwork, cfg.StellarHorizonTimeout)
+	clientResolver := stellar.NewModeAwareClients(stellarClient, testStellarClient)
+	signer := stellar.NewEnvSigner(cfg.MasterEncryptionKey, cfg.StellarLiveNetwork)
+	testSigner := stellar.NewEnvSigner(cfg.MasterEncryptionKey, cfg.StellarTestnetNetwork)
+	signerResolver := stellar.NewModeAwareSigners(signer, testSigner)
 
 	feeSvc := fees.NewService(feeRepo)
 	engine := settlement.NewEngine(
 		txRepo, walletRepo, feeSvc, stellarClient, signer,
-		cfg.StellarNetwork, map[string]string{
+		cfg.StellarLiveNetwork, map[string]string{
 			"USDC": cfg.StellarUSDCIssuer,
 			"EURC": cfg.StellarEURCIssuer,
 		}, cfg.PlatformFeeWalletPublicKey,
-	)
+	).WithClientResolver(clientResolver).WithSignerResolver(signerResolver)
 	settlementWorker := settlement.NewWorker(engine)
 
 	idx := indexer.NewWithConfig(walletRepo, txRepo, stellarClient, indexer.Config{
@@ -120,8 +126,27 @@ func main() {
 		StreamMinBackoff:  parseDuration(cfg.IndexerStreamMinBackoff, 1*time.Second),
 		StreamMaxBackoff:  parseDuration(cfg.IndexerStreamMaxBackoff, 30*time.Second),
 		SyncPageSize:      cfg.IndexerSyncPageSize,
+		StreamConcurrency: cfg.IndexerStreamConcurrency,
+		StreamMaxWallets:  cfg.IndexerStreamMaxWallets,
+		StreamShardCount:  cfg.IndexerStreamShardCount,
+		StreamShardIndex:  cfg.IndexerStreamShardIndex,
 	})
 	indexerWorker := indexer.NewWorker(idx, cfg)
+	metricsMux := http.NewServeMux()
+	metricsMux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+		_, _ = fmt.Fprintf(w, "# HELP fluxa_indexer_active_streams Active Horizon payment streams.\n# TYPE fluxa_indexer_active_streams gauge\nfluxa_indexer_active_streams %d\n", idx.ActiveStreams())
+	})
+	metricsServer := &http.Server{Addr: ":" + cfg.IndexerMetricsPort, Handler: metricsMux}
+	go func() {
+		if err := metricsServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Error().Err(err).Msg("indexer metrics server stopped")
+		}
+	}()
 
 	// StreamAll keeps a live Horizon SSE connection open per wallet so new
 	// payments land in the DB in real time; the @every 30s indexer:sync task
@@ -161,7 +186,10 @@ func main() {
 		}
 	}()
 
-	webhookSvc := webhook.NewConfigService(webhookRepo, webhookRepo, qClient)
+	webhookSvc := webhook.NewConfigService(webhookRepo, webhookRepo, qClient, cfg.MasterEncryptionKey)
+	if err := webhookSvc.(webhook.ConfigService).MigrateLegacySigningSecrets(ctx); err != nil {
+		log.Fatal().Err(err).Msg("migrate tenant webhook signing secrets")
+	}
 	webhookWorker := webhook.NewWorker(webhookSvc)
 	go func() {
 		ticker := time.NewTicker(24 * time.Hour)
@@ -172,6 +200,38 @@ func main() {
 			}
 			select {
 			case <-ticker.C:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
+	// Purge expired idempotency records every hour in batches of 1 000 rows.
+	// Batching avoids a single large DELETE that could lock the table or spike
+	// I/O. The loop drains the full backlog on each tick so that a missed tick
+	// (e.g. worker restart) does not leave a growing tail of stale rows.
+	go func() {
+		const batchSize = 1_000
+		ticker := time.NewTicker(time.Hour)
+		defer ticker.Stop()
+		purge := func() {
+			for {
+				n, err := idempotencyRepo.DeleteExpired(ctx, batchSize)
+				if err != nil {
+					log.Warn().Err(err).Msg("idempotency records cleanup failed")
+					return
+				}
+				log.Debug().Int64("deleted", n).Msg("idempotency records purge batch")
+				if n < batchSize {
+					return // backlog drained
+				}
+			}
+		}
+		purge() // run once at startup to clear any backlog
+		for {
+			select {
+			case <-ticker.C:
+				purge()
 			case <-ctx.Done():
 				return
 			}
@@ -239,7 +299,7 @@ func main() {
 		)
 
 		complianceSvc := compliance.NewService(complianceRepo, screener, sanctionsSet, txRepo, qClient, webhookSvc)
-		transferSvc = transferSvc.WithScreener(complianceSvc)
+		transferSvc = transfer.ConfigureScreener(transferSvc, complianceSvc)
 		complianceWorker = compliance.NewWorker(
 			complianceRepo,
 			compliance.NewHTTPSDNSource(cfg.OFACSDNURL, nil),
@@ -379,6 +439,9 @@ func main() {
 	cancel() // stop indexer payment streams
 	srv.Shutdown()
 	scheduler.Shutdown()
-
-	_ = wallet.NewService
+	metricsCtx, metricsCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer metricsCancel()
+	if err := metricsServer.Shutdown(metricsCtx); err != nil {
+		log.Error().Err(err).Msg("indexer metrics server shutdown")
+	}
 }

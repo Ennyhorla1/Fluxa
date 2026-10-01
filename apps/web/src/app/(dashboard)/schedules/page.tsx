@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState, useCallback, useMemo } from 'react';
-import { api, type ScheduleResponse } from '@/lib/api';
+import { api, type ScheduleResponse, type ScheduleRunResponse } from '@/lib/api';
 import { useAuth } from '@/lib/auth-context';
 import { useToast } from '@/lib/toast-context';
 import { PageHeader } from '@/components/ui/page-header';
@@ -10,10 +10,17 @@ import { Input } from '@/components/ui/input';
 import { Select } from '@/components/ui/select';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from '@/components/ui/table';
 import { EmptyState } from '@/components/ui/empty-state';
 import { Skeleton } from '@/components/ui/skeleton';
-import { Calendar, Plus, Pause, Play, Trash2 } from 'lucide-react';
+import { Calendar, Plus, Pause, Play, Trash2, History } from 'lucide-react';
 
 export default function SchedulesPage() {
   const { getStoredWalletIds } = useAuth();
@@ -22,6 +29,13 @@ export default function SchedulesPage() {
 
   const [schedules, setSchedules] = useState<ScheduleResponse[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState('');
+  const [runHistory, setRunHistory] = useState<{
+    scheduleId: string;
+    loading: boolean;
+    error: string;
+    runs: ScheduleRunResponse[];
+  } | null>(null);
   const [showForm, setShowForm] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [form, setForm] = useState({
@@ -30,17 +44,21 @@ export default function SchedulesPage() {
     asset: 'XLM',
     amount: '',
     frequency: 'weekly' as 'daily' | 'weekly' | 'monthly',
+    missed_run_policy: 'skip' as 'skip' | 'run_once',
     start_date: new Date().toISOString().slice(0, 16),
     end_date: '',
   });
 
   const fetchSchedules = useCallback(async () => {
     setLoading(true);
+    setLoadError('');
     try {
       const res = await api.listSchedules();
       setSchedules(res.schedules || []);
     } catch (err) {
-      toast(err instanceof Error ? err.message : 'Failed to load schedules', 'error');
+      const message = err instanceof Error ? err.message : 'Failed to load schedules';
+      setLoadError(message);
+      toast(message, 'error');
     } finally {
       setLoading(false);
     }
@@ -70,6 +88,7 @@ export default function SchedulesPage() {
         asset: form.asset,
         amount: form.amount,
         frequency: form.frequency,
+        missed_run_policy: form.missed_run_policy,
         start_date: startIso,
         end_date: endIso,
       });
@@ -105,6 +124,21 @@ export default function SchedulesPage() {
     }
   };
 
+  const handleRunHistory = async (scheduleId: string) => {
+    if (runHistory?.scheduleId === scheduleId) {
+      setRunHistory(null);
+      return;
+    }
+    setRunHistory({ scheduleId, loading: true, error: '', runs: [] });
+    try {
+      const res = await api.listScheduleRuns(scheduleId);
+      setRunHistory({ scheduleId, loading: false, error: '', runs: res.runs || [] });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Failed to load payout history';
+      setRunHistory({ scheduleId, loading: false, error: message, runs: [] });
+    }
+  };
+
   if (loading) {
     return (
       <div className="flex flex-col gap-8">
@@ -114,11 +148,34 @@ export default function SchedulesPage() {
     );
   }
 
+  if (loadError) {
+    return (
+      <div className="flex flex-col gap-5">
+        <PageHeader title="Scheduled Payouts" description="Manage recurring tenant payouts." />
+        <Card>
+          <CardContent className="flex flex-col items-start gap-4 py-8">
+            <p role="alert">Could not load scheduled payouts: {loadError}</p>
+            <Button onClick={() => void fetchSchedules()}>Try again</Button>
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
+
   return (
     <div className="flex flex-col gap-8 animate-in fade-in slide-in-from-bottom-4 duration-500">
-      <PageHeader title="Scheduled Payouts" description="Recurring transfers — daily, weekly, monthly. Worker checks every minute.">
+      <PageHeader
+        title="Scheduled Payouts"
+        description="Recurring transfers — daily, weekly, monthly. Worker checks every minute."
+      >
         <Button onClick={() => setShowForm(!showForm)} variant={showForm ? 'secondary' : 'primary'}>
-          {showForm ? 'Cancel' : <><Plus className="h-4 w-4" /> New Schedule</>}
+          {showForm ? (
+            'Cancel'
+          ) : (
+            <>
+              <Plus className="h-4 w-4" /> New Schedule
+            </>
+          )}
         </Button>
       </PageHeader>
 
@@ -133,7 +190,11 @@ export default function SchedulesPage() {
               <div className="grid grid-cols-1 gap-5 md:grid-cols-2">
                 <div className="flex flex-col gap-1.5">
                   <label className="text-sm font-medium">From Wallet</label>
-                  <Select value={form.from_wallet_id} onChange={(e) => setForm({ ...form, from_wallet_id: e.target.value })} required>
+                  <Select
+                    value={form.from_wallet_id}
+                    onChange={(e) => setForm({ ...form, from_wallet_id: e.target.value })}
+                    required
+                  >
                     <option value="">Select wallet</option>
                     {walletIds.map((id) => (
                       <option key={id} value={id}>
@@ -144,7 +205,11 @@ export default function SchedulesPage() {
                 </div>
                 <div className="flex flex-col gap-1.5">
                   <label className="text-sm font-medium">To Wallet</label>
-                  <Select value={form.to_wallet_id} onChange={(e) => setForm({ ...form, to_wallet_id: e.target.value })} required>
+                  <Select
+                    value={form.to_wallet_id}
+                    onChange={(e) => setForm({ ...form, to_wallet_id: e.target.value })}
+                    required
+                  >
                     <option value="">Select wallet</option>
                     {walletIds.map((id) => (
                       <option key={id} value={id}>
@@ -157,29 +222,67 @@ export default function SchedulesPage() {
               <div className="grid grid-cols-2 gap-4">
                 <div className="flex flex-col gap-1.5">
                   <label className="text-sm font-medium">Asset</label>
-                  <Input value={form.asset} onChange={(e) => setForm({ ...form, asset: e.target.value })} required />
+                  <Input
+                    value={form.asset}
+                    onChange={(e) => setForm({ ...form, asset: e.target.value })}
+                    required
+                  />
                 </div>
                 <div className="flex flex-col gap-1.5">
                   <label className="text-sm font-medium">Amount</label>
-                  <Input value={form.amount} onChange={(e) => setForm({ ...form, amount: e.target.value })} required className="font-mono" />
+                  <Input
+                    value={form.amount}
+                    onChange={(e) => setForm({ ...form, amount: e.target.value })}
+                    required
+                    className="font-mono"
+                  />
                 </div>
               </div>
-              <div className="grid grid-cols-1 gap-5 md:grid-cols-3">
+              <div className="grid grid-cols-1 gap-5 md:grid-cols-4">
                 <div className="flex flex-col gap-1.5">
                   <label className="text-sm font-medium">Frequency</label>
-                  <Select value={form.frequency} onChange={(e) => setForm({ ...form, frequency: e.target.value as 'daily' | 'weekly' | 'monthly' })}>
+                  <Select
+                    value={form.frequency}
+                    onChange={(e) =>
+                      setForm({
+                        ...form,
+                        frequency: e.target.value as 'daily' | 'weekly' | 'monthly',
+                      })
+                    }
+                  >
                     <option value="daily">Daily</option>
                     <option value="weekly">Weekly</option>
                     <option value="monthly">Monthly</option>
                   </Select>
                 </div>
                 <div className="flex flex-col gap-1.5">
+                  <label className="text-sm font-medium">Missed payout behavior</label>
+                  <Select
+                    value={form.missed_run_policy}
+                    onChange={(e) =>
+                      setForm({ ...form, missed_run_policy: e.target.value as 'skip' | 'run_once' })
+                    }
+                  >
+                    <option value="skip">Skip missed occurrences</option>
+                    <option value="run_once">Make one catch-up payout</option>
+                  </Select>
+                </div>
+                <div className="flex flex-col gap-1.5">
                   <label className="text-sm font-medium">Start Date</label>
-                  <Input type="datetime-local" value={form.start_date} onChange={(e) => setForm({ ...form, start_date: e.target.value })} required />
+                  <Input
+                    type="datetime-local"
+                    value={form.start_date}
+                    onChange={(e) => setForm({ ...form, start_date: e.target.value })}
+                    required
+                  />
                 </div>
                 <div className="flex flex-col gap-1.5">
                   <label className="text-sm font-medium">End Date (optional)</label>
-                  <Input type="datetime-local" value={form.end_date} onChange={(e) => setForm({ ...form, end_date: e.target.value })} />
+                  <Input
+                    type="datetime-local"
+                    value={form.end_date}
+                    onChange={(e) => setForm({ ...form, end_date: e.target.value })}
+                  />
                 </div>
               </div>
               <div className="flex justify-end">
@@ -194,7 +297,11 @@ export default function SchedulesPage() {
 
       <Card>
         {schedules.length === 0 ? (
-          <EmptyState icon={Calendar} title="No schedules" description="Create a recurring payout to automate transfers." />
+          <EmptyState
+            icon={Calendar}
+            title="No schedules"
+            description="Create a recurring payout to automate transfers."
+          />
         ) : (
           <Table>
             <TableHead>
@@ -219,7 +326,9 @@ export default function SchedulesPage() {
                     {s.amount} {s.asset}
                   </TableCell>
                   <TableCell>{s.frequency}</TableCell>
-                  <TableCell className="text-muted-foreground text-xs">{new Date(s.next_run_at).toLocaleString()}</TableCell>
+                  <TableCell className="text-muted-foreground text-xs">
+                    {new Date(s.next_run_at).toLocaleString()}
+                  </TableCell>
                   <TableCell>
                     {s.status === 'active' ? (
                       <Badge variant="success">active</Badge>
@@ -230,13 +339,25 @@ export default function SchedulesPage() {
                     )}
                   </TableCell>
                   <TableCell className="text-right flex justify-end gap-2">
-                    {(s.status === 'active' || s.status === 'paused') && (
+                    {(s.status === 'active' || s.status === 'paused' || s.status === 'failed') && (
                       <Button variant="ghost" size="sm" onClick={() => handleToggle(s)}>
-                        {s.status === 'active' ? <Pause className="h-3.5 w-3.5" /> : <Play className="h-3.5 w-3.5" />}
+                        {s.status === 'active' ? (
+                          <Pause className="h-3.5 w-3.5" />
+                        ) : (
+                          <Play className="h-3.5 w-3.5" />
+                        )}
                         {s.status === 'active' ? 'Pause' : 'Resume'}
                       </Button>
                     )}
-                    <Button variant="ghost" size="sm" className="text-danger hover:text-danger" onClick={() => handleCancel(s.id)}>
+                    <Button variant="ghost" size="sm" onClick={() => void handleRunHistory(s.id)}>
+                      <History className="h-3.5 w-3.5" /> History
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="text-danger hover:text-danger"
+                      onClick={() => handleCancel(s.id)}
+                    >
                       <Trash2 className="h-3.5 w-3.5" />
                       Cancel
                     </Button>
@@ -247,6 +368,60 @@ export default function SchedulesPage() {
           </Table>
         )}
       </Card>
+      {runHistory && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Payout history</CardTitle>
+            <CardDescription>Schedule {runHistory.scheduleId.slice(0, 8)}</CardDescription>
+          </CardHeader>
+          <CardContent>
+            {runHistory.loading ? (
+              <Skeleton className="h-20" />
+            ) : runHistory.error ? (
+              <p role="alert" className="text-danger">
+                {runHistory.error}
+              </p>
+            ) : runHistory.runs.length === 0 ? (
+              <p className="text-sm text-muted-foreground">No payout attempts yet.</p>
+            ) : (
+              <Table>
+                <TableHead>
+                  <TableRow>
+                    <TableHeader>Scheduled at</TableHeader>
+                    <TableHeader>Status</TableHeader>
+                    <TableHeader>Transfer</TableHeader>
+                    <TableHeader>Details</TableHeader>
+                  </TableRow>
+                </TableHead>
+                <TableBody>
+                  {runHistory.runs.map((run) => (
+                    <TableRow key={run.id}>
+                      <TableCell>{new Date(run.expected_run_at).toLocaleString()}</TableCell>
+                      <TableCell>
+                        <Badge
+                          variant={
+                            run.status === 'succeeded'
+                              ? 'success'
+                              : run.status === 'failed'
+                                ? 'warning'
+                                : 'default'
+                          }
+                        >
+                          {run.status}
+                        </Badge>
+                      </TableCell>
+                      <TableCell className="font-mono text-xs">
+                        {run.transaction_id?.slice(0, 8) || '—'}
+                      </TableCell>
+                      <TableCell>{run.error || '—'}</TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            )}
+          </CardContent>
+        </Card>
+      )}
     </div>
   );
 }

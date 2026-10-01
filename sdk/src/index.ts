@@ -1,5 +1,6 @@
-export { FluxaClient } from "./client";
-export type { FluxaClientConfig } from "./client";
+export { FluxaClient } from './client';
+export type { FluxaClientConfig } from './client';
+export type { RequestOptions } from './http';
 
 export {
   FluxaError,
@@ -8,13 +9,19 @@ export {
   ValidationError,
   RateLimitError,
   ConflictError,
-} from "./errors";
+  RepeatedCursorError,
+} from './errors';
+
+export { createPage, paginate, paginatePages, paginateAll } from './pagination';
+export type { Page, PageFetcher, PaginateOptions } from './pagination';
 
 export type {
   // Wallet
   CreateWalletResponse,
   Balance,
   GetBalancesResponse,
+  CreateTrustlineRequest,
+  TrustlineResponse,
   // Transfer
   TransactionStatus,
   TransactionType,
@@ -46,6 +53,12 @@ export type {
   DepositResponse,
   WithdrawRequest,
   WithdrawResponse,
+  CreatePaymentLinkRequest,
+  PaymentLinkResponse,
+  PaymentLinksResponse,
+  CreateRefundRequest,
+  RefundResponse,
+  RefundsResponse,
   // Webhook
   EventType,
   DeliveryStatus,
@@ -54,6 +67,11 @@ export type {
   ListWebhooksResponse,
   WebhookDeliveryResponse,
   ListDeliveriesResponse,
+  WebhookSigningSecretStatus,
+  WebhookSigningSecretMetadata,
+  ListWebhookSigningSecretsResponse,
+  RotateWebhookSigningSecretRequest,
+  RotateWebhookSigningSecretResponse,
   // Schedule
   ScheduleFrequency,
   ScheduleStatus,
@@ -61,20 +79,27 @@ export type {
   UpdateScheduleRequest,
   ScheduleResponse,
   ListSchedulesResponse,
+  ScheduleRunStatus,
+  ScheduleRunResponse,
+  ListScheduleRunsResponse,
   // API Key
+  APIKeyScope,
+  APIKeyScopeResource,
   CreateKeyRequest,
   CreateKeyResponse,
   APIKeyResponse,
   // Health
   HealthResponse,
-} from "./types";
+} from './types';
 
 // Re-export resource classes for advanced usage
-export { WalletsResource } from "./resources/wallets";
-export { TransfersResource } from "./resources/transfers";
-export { FXResource } from "./resources/fx";
-export { SchedulesResource } from "./resources/schedules";
-export { WebhooksResource } from "./resources/webhooks";
-export { FeesResource } from "./resources/fees";
-export { KeysResource } from "./resources/keys";
-export { FiatResource } from "./resources/fiat";
+export { WalletsResource } from './resources/wallets';
+export { TransfersResource } from './resources/transfers';
+export { FXResource } from './resources/fx';
+export { SchedulesResource } from './resources/schedules';
+export { WebhooksResource } from './resources/webhooks';
+export { FeesResource } from './resources/fees';
+export { KeysResource } from './resources/keys';
+export { FiatResource } from './resources/fiat';
+export { PaymentLinksResource } from './resources/payment_links';
+export { RefundsResource } from './resources/refunds';
