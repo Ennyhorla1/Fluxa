@@ -188,8 +188,7 @@ func main() {
 		WithTestnetProvisioner(wallet.NewFriendbotProvisioner(cfg.FriendbotURL)).
 		WithIssuers(cfg.StellarUSDCIssuer, cfg.StellarEURCIssuer)
 	transferSvc := transfer.ConfigureClientResolver(
-		transfer.ConfigureStellarClient(transfer.NewService(txRepo, walletRepo, feeSvc, queueClient, tenantRepo).
-			WithAuditLogger(txRepo), stellarClient),
+		transfer.ConfigureStellarClient(transfer.NewService(txRepo, walletRepo, feeSvc, queueClient, tenantRepo), stellarClient),
 		clientResolver,
 	)
 	webhookSvc := webhook.NewService(webhookRepo, redisClient, queueClient, 120, cfg.WebhookAllowPrivateNetworks, cfg.MasterEncryptionKey)

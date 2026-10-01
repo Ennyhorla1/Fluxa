@@ -13,6 +13,7 @@ import (
 	"github.com/fluxa/fluxa/internal/tenant"
 	walletpkg "github.com/fluxa/fluxa/internal/wallet"
 	"github.com/google/uuid"
+	"github.com/rs/zerolog"
 	"github.com/shopspring/decimal"
 )
 

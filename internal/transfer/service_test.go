@@ -13,6 +13,7 @@ import (
 	"github.com/fluxa/fluxa/internal/transfer"
 	"github.com/fluxa/fluxa/internal/wallet"
 	"github.com/google/uuid"
+	"github.com/hibiken/asynq"
 	"github.com/shopspring/decimal"
 	"time"
 )
@@ -268,7 +269,7 @@ func TestListTransactions(t *testing.T) {
 }
 
 type failingQueueRepo struct {
-	Repository
+	transfer.Repository
 }
 
 func (r *failingQueueRepo) Create(ctx context.Context, tx *domain.Transaction) error {
@@ -281,6 +282,10 @@ type failingWalletRepo struct {
 
 func (r *failingWalletRepo) GetByID(ctx context.Context, id string) (*domain.Wallet, error) {
 	return &domain.Wallet{ID: id, PublicKey: "GXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"}, nil
+}
+
+func (r *failingWalletRepo) GetBalances(context.Context, string) ([]domain.BalanceRecord, error) {
+	return []domain.BalanceRecord{{AssetCode: "USDC", Balance: "100"}}, nil
 }
 
 type failingFeeService struct {
@@ -312,7 +317,7 @@ func TestInitiateTransfer_EnqueueFailure(t *testing.T) {
 }
 
 func TestServiceEnqueueFailureObservable(t *testing.T) {
-	q := queue.NewClient("redis://invalid:6379")
+	q := queue.NewClientWithOptions(asynq.RedisClientOpt{Addr: "127.0.0.1:1"})
 	svc := transfer.NewService(&failingQueueRepo{}, &failingWalletRepo{}, &failingFeeService{}, q)
 	_, err := svc.InitiateTransfer(context.Background(), "wallet-1", "wallet-2", "USDC", decimal.NewFromInt(10))
 	if err == nil {
