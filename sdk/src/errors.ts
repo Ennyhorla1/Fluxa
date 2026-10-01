@@ -1,19 +1,23 @@
 export interface FluxaErrorBody {
   code: string;
   message: string;
+  status?: number;
+  request_id?: string;
   details?: unknown;
 }
 
 export class FluxaError extends Error {
   readonly statusCode: number;
   readonly code: string;
+  readonly requestId?: string;
   readonly details?: unknown;
 
   constructor(statusCode: number, body: FluxaErrorBody) {
     super(body.message);
     this.name = 'FluxaError';
-    this.statusCode = statusCode;
+    this.statusCode = body.status ?? statusCode;
     this.code = body.code;
+    this.requestId = body.request_id;
     this.details = body.details;
   }
 }
@@ -66,6 +70,8 @@ export function classifyError(status: number, body: unknown): FluxaError {
     const parsed: FluxaErrorBody = {
       code: detail.code,
       message: detail.message,
+      status: detail.status ?? status,
+      request_id: detail.request_id,
       details: envelope.validation_errors ?? detail.details,
     };
 

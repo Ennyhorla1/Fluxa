@@ -4,9 +4,11 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/fluxa/fluxa/internal/anchor"
+	"github.com/fluxa/fluxa/internal/api"
 	"github.com/fluxa/fluxa/internal/apikey"
 	"github.com/fluxa/fluxa/internal/audit"
 	"github.com/fluxa/fluxa/internal/auth"
@@ -101,6 +103,20 @@ func New(
 	r.Use(CORS(corsOrigins))
 	r.Use(MaxBodySize(1 << 20))
 	r.Use(MetricsMiddleware)
+	r.NotFound(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1" || strings.HasPrefix(r.URL.Path, "/v1/") {
+			api.Error(w, http.StatusNotFound, "NOT_FOUND", "route not found")
+			return
+		}
+		http.NotFound(w, r)
+	})
+	r.MethodNotAllowed(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1" || strings.HasPrefix(r.URL.Path, "/v1/") {
+			api.Error(w, http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED", "method not allowed")
+			return
+		}
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	})
 
 	componentProbes := make(map[string]fluxahealth.Probe, len(healthChecks))
 	for name, check := range healthChecks {

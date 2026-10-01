@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strings"
 	"time"
@@ -20,7 +21,7 @@ import (
 
 func requestID(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		id := r.Header.Get("X-Request-ID")
+		id := strings.TrimSpace(r.Header.Get("X-Request-ID"))
 		if id == "" {
 			id = uuid.New().String()
 		}
@@ -55,7 +56,7 @@ func recoverer(next http.Handler) http.Handler {
 		defer func() {
 			if rv := recover(); rv != nil {
 				zerolog.Ctx(r.Context()).Error().Interface("panic", rv).Msg("panic recovered")
-				http.Error(w, "internal server error", http.StatusInternalServerError)
+				api.Error(w, http.StatusInternalServerError, "INTERNAL_ERROR", "an unexpected error occurred")
 			}
 		}()
 		next.ServeHTTP(w, r)
@@ -88,6 +89,7 @@ func CORS(allowedOrigins []string) func(http.Handler) http.Handler {
 
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
 			w.Header().Set("Access-Control-Allow-Headers", "Accept, Authorization, Content-Type, X-Request-ID, X-Fluxa-Mode")
+			w.Header().Set("Access-Control-Expose-Headers", "X-Request-ID")
 			w.Header().Set("Access-Control-Max-Age", "86400")
 			if r.Method == http.MethodOptions {
 				w.WriteHeader(http.StatusNoContent)
@@ -124,7 +126,7 @@ func AuthMiddleware(repo *postgres.APIKeyRepo, jwtSecret []byte, validator Membe
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			authHeader := r.Header.Get("Authorization")
 			if authHeader == "" || len(authHeader) <= 7 || authHeader[:7] != "Bearer " {
-				http.Error(w, "missing or invalid authorization header", http.StatusUnauthorized)
+				api.Error(w, http.StatusUnauthorized, "UNAUTHORIZED", "missing or invalid authorization header")
 				return
 			}
 
@@ -138,8 +140,12 @@ func AuthMiddleware(repo *postgres.APIKeyRepo, jwtSecret []byte, validator Membe
 					// cannot be used after removal or demotion.
 					if validator != nil {
 						member, mErr := validator.GetMember(r.Context(), claims.TenantID, claims.Sub)
+						if mErr != nil && !errors.Is(mErr, domain.ErrOrgMemberNotFound) {
+							api.InternalError(w, mErr)
+							return
+						}
 						if mErr != nil || member == nil {
-							http.Error(w, "membership not found or revoked", http.StatusForbidden)
+							api.Error(w, http.StatusForbidden, "FORBIDDEN", "membership not found or revoked")
 							return
 						}
 						// Use the current role from the database, not the stale JWT claim.
@@ -169,16 +175,20 @@ func AuthMiddleware(repo *postgres.APIKeyRepo, jwtSecret []byte, validator Membe
 			// Fallback to API Key auth
 			hash := apikey.Hash(rawToken)
 			key, err := repo.GetByHash(r.Context(), hash)
-			if err != nil || key == nil {
-				http.Error(w, "invalid api key or authentication token", http.StatusUnauthorized)
+			if err != nil {
+				api.InternalError(w, err)
+				return
+			}
+			if key == nil {
+				api.Error(w, http.StatusUnauthorized, "UNAUTHORIZED", "invalid api key or authentication token")
 				return
 			}
 			if key.RevokedAt != nil {
-				http.Error(w, "revoked api key", http.StatusUnauthorized)
+				api.Error(w, http.StatusUnauthorized, "API_KEY_REVOKED", "revoked api key")
 				return
 			}
 			if key.IsExpired(time.Now().UTC()) {
-				http.Error(w, "expired api key", http.StatusUnauthorized)
+				api.Error(w, http.StatusUnauthorized, "API_KEY_EXPIRED", "expired api key")
 				return
 			}
 			// The environment is a property of the credential, not of the
@@ -186,7 +196,7 @@ func AuthMiddleware(repo *postgres.APIKeyRepo, jwtSecret []byte, validator Membe
 			// other even if the raw key collides with a persisted record.
 			rawMode, modeErr := apikey.ModeFromRaw(rawToken)
 			if modeErr != nil || rawMode != key.Mode {
-				http.Error(w, "api key mode does not match persisted authorization", http.StatusUnauthorized)
+				api.Error(w, http.StatusUnauthorized, "UNAUTHORIZED", "api key mode does not match persisted authorization")
 				return
 			}
 
@@ -225,7 +235,7 @@ func RequireRole(allowedRoles ...string) func(http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			role := tenant.RoleFromContext(r.Context())
 			if role == "" {
-				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				api.Error(w, http.StatusUnauthorized, "UNAUTHORIZED", "unauthorized")
 				return
 			}
 
@@ -236,7 +246,7 @@ func RequireRole(allowedRoles ...string) func(http.Handler) http.Handler {
 				}
 			}
 
-			http.Error(w, "insufficient permissions", http.StatusForbidden)
+			api.Error(w, http.StatusForbidden, "FORBIDDEN", "insufficient permissions")
 		})
 	}
 }
@@ -262,7 +272,7 @@ func RequireNotViewer(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		role := tenant.RoleFromContext(r.Context())
 		if role == domain.RoleViewer {
-			http.Error(w, "viewer role is read-only", http.StatusForbidden)
+			api.Error(w, http.StatusForbidden, "FORBIDDEN", "viewer role is read-only")
 			return
 		}
 		next.ServeHTTP(w, r)
@@ -274,7 +284,7 @@ func RequirePlatformOperator() func(http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			tenantID := tenant.IDFromContext(r.Context())
 			if tenantID != "platform" && tenantID != "system" && tenantID != "operator" {
-				http.Error(w, "unauthorized: platform operator access required", http.StatusForbidden)
+				api.Error(w, http.StatusForbidden, "FORBIDDEN", "unauthorized: platform operator access required")
 				return
 			}
 			next.ServeHTTP(w, r)
