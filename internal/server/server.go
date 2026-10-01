@@ -199,6 +199,9 @@ func New(
 			}
 
 			// Org Member Management (Owner & Admin for invite, role update, remove)
+			if tenantDataHandler != nil {
+				r.With(RequireRole(domain.RoleOwner, domain.RoleAdmin)).Get("/data-export", tenantDataHandler.Export)
+			}
 			r.Route("/org", func(r chi.Router) {
 				r.With(RequireRole(domain.RoleOwner, domain.RoleAdmin)).Post("/members/invite", orgHandler.InviteMember)
 				r.Get("/members", orgHandler.ListMembers)

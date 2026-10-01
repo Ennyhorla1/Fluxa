@@ -105,6 +105,8 @@ tags:
   description: Claimable balance lookup and claiming
 - name: Audit
   description: Append-only tenant audit events and export
+- name: Data
+  description: Tenant compliance exports
 - name: Idempotency
   description: Inspection and recovery of idempotent operations
 security:
