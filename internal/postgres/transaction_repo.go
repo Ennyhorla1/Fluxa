@@ -672,15 +672,40 @@ func (r *TransactionRepo) UpdateReconciledAt(ctx context.Context, id string) err
 
 // WriteAuditLog inserts a row into the ledger_audit_log table.
 func (r *TransactionRepo) WriteAuditLog(ctx context.Context, entry *domain.AuditLogEntry) error {
-	_, err := r.db.Exec(ctx,
-		`INSERT INTO ledger_audit_log (id, tx_id, stellar_hash, checked_at, horizon_status, amount_verified, asset_verified, fee_verified, outcome, details)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
-		entry.ID, entry.TxID, entry.StellarHash, entry.CheckedAt,
-		entry.HorizonStatus, entry.AmountVerified, entry.AssetVerified, entry.FeeVerified,
-		entry.Outcome, entry.Details,
-	)
+	err := RunInTx(ctx, r.db, func(txCtx context.Context) error {
+		db := TxFromContext(txCtx, r.db)
+		_, err := db.Exec(txCtx,
+			`INSERT INTO ledger_audit_log (id, tx_id, stellar_hash, checked_at, horizon_status, amount_verified, asset_verified, fee_verified, outcome, details)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+			entry.ID, entry.TxID, entry.StellarHash, entry.CheckedAt,
+			entry.HorizonStatus, entry.AmountVerified, entry.AssetVerified, entry.FeeVerified,
+			entry.Outcome, entry.Details,
+		)
+		if err != nil {
+			return fmt.Errorf("write audit log: %w", err)
+		}
+		if entry.Outcome == domain.AuditOK {
+			return nil
+		}
+		category := domain.ReconciliationDiscrepancyCategory(entry)
+		_, err = db.Exec(txCtx,
+			`INSERT INTO reconciliation_discrepancies
+			 (tenant_id, transaction_id, category, last_audit_log_id)
+			 SELECT tenant_id, id, $2, $3 FROM transactions WHERE id = $1 AND tenant_id IS NOT NULL
+			 ON CONFLICT (transaction_id, category) DO UPDATE
+			 SET last_audit_log_id = EXCLUDED.last_audit_log_id,
+			     status = CASE WHEN reconciliation_discrepancies.status = 'resolved' THEN 'open' ELSE reconciliation_discrepancies.status END,
+			     resolved_at = CASE WHEN reconciliation_discrepancies.status = 'resolved' THEN NULL ELSE reconciliation_discrepancies.resolved_at END,
+			     updated_at = NOW()`,
+			entry.TxID, category, entry.ID,
+		)
+		if err != nil {
+			return fmt.Errorf("upsert reconciliation discrepancy: %w", err)
+		}
+		return nil
+	})
 	if err != nil {
-		return fmt.Errorf("write audit log: %w", err)
+		return fmt.Errorf("write reconciliation audit result: %w", err)
 	}
 	return nil
 }

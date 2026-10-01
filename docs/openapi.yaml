@@ -2150,6 +2150,72 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '500':
           $ref: '#/components/responses/InternalServerError'
+  /v1/admin/reconciliation/discrepancies:
+    get:
+      operationId: listReconciliationDiscrepancies
+      summary: List tenant reconciliation discrepancies
+      tags: [Admin]
+      security:
+      - AdminAuth: []
+      parameters:
+      - name: status
+        in: query
+        schema: {type: string, enum: [open, acknowledged, resolved]}
+      - name: category
+        in: query
+        schema: {type: string}
+      - name: limit
+        in: query
+        schema: {type: integer, minimum: 1, maximum: 100}
+      - name: offset
+        in: query
+        schema: {type: integer, minimum: 0}
+      responses:
+        '200': {description: Paginated tenant discrepancies with transaction and audit details}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '500': {$ref: '#/components/responses/InternalServerError'}
+  /v1/admin/reconciliation/discrepancies/summary:
+    get:
+      operationId: getReconciliationDiscrepancyMetrics
+      summary: Get unresolved reconciliation discrepancy metrics
+      tags: [Admin]
+      security:
+      - AdminAuth: []
+      responses:
+        '200': {description: Counts by state and category, unresolved count, oldest unresolved timestamp}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '500': {$ref: '#/components/responses/InternalServerError'}
+  /v1/admin/reconciliation/discrepancies/{id}:
+    patch:
+      operationId: updateReconciliationDiscrepancy
+      summary: Acknowledge, assign, annotate, or resolve a discrepancy
+      tags: [Admin]
+      security:
+      - AdminAuth: []
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema: {type: string, format: uuid}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [action]
+              properties:
+                action: {type: string, enum: [acknowledged, assigned, annotated, resolved]}
+                note: {type: string}
+                assigned_to: {type: string, format: uuid}
+      responses:
+        '200': {description: Updated discrepancy with audit history}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '500': {$ref: '#/components/responses/InternalServerError'}
   /v1/admin/reconciliation/summary:
     get:
       operationId: getReconciliationSummary
