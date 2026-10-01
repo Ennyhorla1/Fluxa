@@ -5,16 +5,18 @@ import {
   GetBalancesResponse,
   TrustlineResponse,
 } from '../types';
+import { generateIdempotencyKey } from '../idempotency';
 
 export class WalletsResource {
   constructor(private http: HttpClient) {}
 
   async create(options?: RequestOptions): Promise<CreateWalletResponse> {
+    const idempotencyKey = options?.idempotencyKey ?? generateIdempotencyKey();
     const res = await this.http.request<CreateWalletResponse>({
       method: 'POST',
       path: '/wallets',
       signal: options?.signal,
-      idempotencyKey: options?.idempotencyKey,
+      idempotencyKey,
     });
     return res.data;
   }
@@ -33,12 +35,13 @@ export class WalletsResource {
     request: CreateTrustlineRequest,
     options?: RequestOptions,
   ): Promise<TrustlineResponse> {
+    const idempotencyKey = options?.idempotencyKey ?? generateIdempotencyKey();
     const res = await this.http.request<TrustlineResponse>({
       method: 'POST',
       path: `/wallets/${encodeURIComponent(walletId)}/trustlines`,
       body: request,
       signal: options?.signal,
-      idempotencyKey: options?.idempotencyKey,
+      idempotencyKey,
     });
     return res.data;
   }
