@@ -60,6 +60,7 @@ function requiresIdempotencyKey(method: string, path: string): boolean {
       '/claimable-balances',
       '/payment-links',
       '/refunds',
+      '/webhooks/secret/rotate',
     ].includes(path)
   ) {
     return true;

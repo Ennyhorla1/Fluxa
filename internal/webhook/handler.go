@@ -1,26 +1,54 @@
 package webhook
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"strconv"
+	"strings"
+	"time"
 
 	"github.com/fluxa/fluxa/internal/api"
 	"github.com/fluxa/fluxa/internal/domain"
 	"github.com/fluxa/fluxa/internal/tenant"
+	"github.com/fluxa/fluxa/internal/tracing"
 	"github.com/go-chi/chi/v5"
 )
 
 type Handler struct {
-	svc Service
+	svc            Service
+	audit          interface {
+		Record(context.Context, *domain.AuditEvent) error
+	}
+	idempotencyMW  func(http.Handler) http.Handler
 }
 
 func NewHandler(svc Service) *Handler {
 	return &Handler{svc: svc}
+}
+
+func (h *Handler) WithAuditLogger(audit interface {
+	Record(context.Context, *domain.AuditEvent) error
+}) *Handler {
+	h.audit = audit
+	return h
+}
+
+func (h *Handler) WithIdempotency(mw func(http.Handler) http.Handler) *Handler {
+	h.idempotencyMW = mw
+	return h
+}
+
+func (h *Handler) IdempotencyMiddleware() func(http.Handler) http.Handler {
+	if h.idempotencyMW != nil {
+		return h.idempotencyMW
+	}
+	return func(next http.Handler) http.Handler { return next }
 }
 
 func (h *Handler) RegisterRoutes(r chi.Router) {
@@ -29,7 +57,7 @@ func (h *Handler) RegisterRoutes(r chi.Router) {
 	r.Delete("/{id}", h.DeleteEndpoint)
 	r.Get("/{id}/deliveries", h.ListDeliveries)
 	r.Get("/secret", h.GetSigningSecret)
-	r.Post("/secret/rotate", h.RotateSigningSecret)
+	r.With(h.IdempotencyMiddleware()).Post("/secret/rotate", h.RotateSigningSecret)
 	r.With(VerifyRateLimit()).Post("/verify", h.VerifySignature)
 
 	r.Post("/subscriptions", h.CreateSubscription)
@@ -143,11 +171,87 @@ func (h *Handler) ListDeliveries(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) GetSigningSecret(w http.ResponseWriter, r *http.Request) {
-	api.Error(w, http.StatusNotImplemented, "NOT_IMPLEMENTED", "signing secret management not yet available")
+	if tenant.IDFromContext(r.Context()) == "" {
+		api.Error(w, http.StatusUnauthorized, "UNAUTHORIZED", "tenant required")
+		return
+	}
+	cs, ok := h.svc.(ConfigService)
+	if !ok {
+		api.Error(w, http.StatusNotFound, "NOT_FOUND", "webhook secret service unavailable")
+		return
+	}
+	secrets, err := cs.ListSigningSecrets(r.Context())
+	if err != nil {
+		writeSecretServiceError(w, err)
+		return
+	}
+	api.JSON(w, http.StatusOK, map[string]interface{}{"secrets": secrets})
 }
 
 func (h *Handler) RotateSigningSecret(w http.ResponseWriter, r *http.Request) {
-	api.Error(w, http.StatusNotImplemented, "NOT_IMPLEMENTED", "signing secret rotation not yet available")
+	if tenant.IDFromContext(r.Context()) == "" {
+		api.Error(w, http.StatusUnauthorized, "UNAUTHORIZED", "tenant required")
+		return
+	}
+	cs, ok := h.svc.(ConfigService)
+	if !ok {
+		api.Error(w, http.StatusNotFound, "NOT_FOUND", "webhook secret service unavailable")
+		return
+	}
+	var req struct {
+		OverlapWindowSeconds *int `json:"overlap_window_seconds,omitempty"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+		api.Error(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid request body")
+		return
+	}
+	seconds := 300
+	if req.OverlapWindowSeconds != nil {
+		seconds = *req.OverlapWindowSeconds
+	}
+	if seconds < 0 || seconds > int((24*time.Hour)/time.Second) {
+		api.Error(w, http.StatusBadRequest, "INVALID_REQUEST", "overlap_window_seconds must be between 0 and 86400")
+		return
+	}
+	metadata, secret, err := cs.RotateSigningSecret(r.Context(), time.Duration(seconds)*time.Second)
+	if err != nil {
+		writeSecretServiceError(w, err)
+		return
+	}
+	if h.audit != nil {
+		if auditErr := h.audit.Record(r.Context(), &domain.AuditEvent{
+			Action:       "webhook.signing_secret.rotated",
+			ResourceType: "webhook_signing_secret",
+			ResourceID:   metadata.KeyID,
+			Metadata: map[string]interface{}{
+				"key_id":                 metadata.KeyID,
+				"overlap_window_seconds": seconds,
+			},
+		}); auditErr != nil {
+			tracing.Logger(r.Context()).Error().Msg("webhook signing secret rotated but audit record failed")
+		}
+	}
+	api.JSON(w, http.StatusOK, map[string]interface{}{
+		"key_id":                 metadata.KeyID,
+		"secret":                 secret,
+		"created_at":             metadata.CreatedAt,
+		"activated_at":           metadata.ActivatedAt,
+		"retired_at":             metadata.RetiredAt,
+		"status":                 metadata.Status,
+		"overlap_window_seconds": seconds,
+	})
+}
+
+func writeSecretServiceError(w http.ResponseWriter, err error) {
+	if errors.Is(err, domain.ErrWebhookConfigNotFound) {
+		api.Error(w, http.StatusNotFound, "NOT_FOUND", "webhook signing secret unavailable")
+		return
+	}
+	if strings.Contains(err.Error(), "overlap window") {
+		api.Error(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid overlap window")
+		return
+	}
+	api.Error(w, http.StatusInternalServerError, "INTERNAL_ERROR", "webhook signing secret operation failed")
 }
 
 func (h *Handler) VerifySignature(w http.ResponseWriter, r *http.Request) {

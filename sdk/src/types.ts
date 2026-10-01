@@ -312,6 +312,29 @@ export interface ListDeliveriesResponse {
   deliveries: WebhookDeliveryResponse[];
 }
 
+export type WebhookSigningSecretStatus = 'active' | 'overlapping' | 'retired';
+
+export interface WebhookSigningSecretMetadata {
+  key_id: string;
+  created_at: string;
+  activated_at: string;
+  retired_at?: string | null;
+  status: WebhookSigningSecretStatus;
+}
+
+export interface ListWebhookSigningSecretsResponse {
+  secrets: WebhookSigningSecretMetadata[];
+}
+
+export interface RotateWebhookSigningSecretRequest {
+  overlap_window_seconds?: number;
+}
+
+export interface RotateWebhookSigningSecretResponse extends WebhookSigningSecretMetadata {
+  secret: string;
+  overlap_window_seconds: number;
+}
+
 // ── Schedule ────────────────────────────────────────────────────────────────
 
 export type ScheduleFrequency = 'daily' | 'weekly' | 'monthly';

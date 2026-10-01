@@ -201,6 +201,8 @@ func New(
 				r.With(RequireScope(domain.ScopeWebhooksRead)).Get("/", webhookHandler.ListEndpoints)
 				r.With(RequireRole(domain.RoleOwner, domain.RoleAdmin), RequireScope(domain.ScopeWebhooksWrite)).Delete("/{id}", webhookHandler.DeleteEndpoint)
 				r.With(RequireScope(domain.ScopeWebhooksRead)).Get("/{id}/deliveries", webhookHandler.ListDeliveries)
+				r.With(RequireScope(domain.ScopeWebhooksRead)).Get("/secret", webhookHandler.GetSigningSecret)
+				r.With(RequireRole(domain.RoleOwner, domain.RoleAdmin), RequireScope(domain.ScopeWebhooksWrite), webhookHandler.IdempotencyMiddleware()).Post("/secret/rotate", webhookHandler.RotateSigningSecret)
 			})
 
 			// Sandbox-only escape hatch: lets a developer drive a webhook event

@@ -190,7 +190,12 @@ func main() {
 			WithStellarClient(stellarClient),
 		clientResolver,
 	)
-	webhookSvc := webhook.NewService(webhookRepo, redisClient, queueClient, 120, cfg.WebhookAllowPrivateNetworks)
+	webhookSvc := webhook.NewService(webhookRepo, redisClient, queueClient, 120, cfg.WebhookAllowPrivateNetworks, cfg.MasterEncryptionKey)
+	if configSvc, ok := webhookSvc.(webhook.ConfigService); ok {
+		if err := configSvc.MigrateLegacySigningSecrets(ctx); err != nil {
+			log.Fatal().Err(err).Msg("migrate tenant webhook signing secrets")
+		}
+	}
 
 	// Compliance screening sits in front of settlement, so it is wired before
 	// the services that initiate transfers. When disabled, no screener is
@@ -370,7 +375,12 @@ func main() {
 	anchorHandler := anchor.NewHandler(anchorRegistry)
 	feeHandler := fees.NewHandler(feeSvc)
 	apikeyHandler := apikey.NewHandler(apiKeyRepo).WithAuditLogger(auditSvc)
-	webhookHandler := webhook.NewHandler(webhookSvc)
+	webhookHandler := webhook.NewHandler(webhookSvc).
+		WithIdempotency(idempotency.MiddlewareWithOptions(idempotencyRepo, idempotency.Options{
+			Required:              true,
+			ResponseEncryptionKey: cfg.MasterEncryptionKey,
+		})).
+		WithAuditLogger(auditSvc)
 	assetRegistry := assets.NewRegistry(cfg.StellarUSDCIssuer, cfg.StellarEURCIssuer)
 	batchHandler := batch.NewHandler(batchSvc).WithIdempotency(batchIdemMW).WithAssetValidator(assetRegistry.IsSupported)
 	scheduleHandler := schedule.NewHandler(scheduleSvc).
