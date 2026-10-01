@@ -80,6 +80,7 @@ func New(
 	var walletBalanceAlertHandler *wallet_balance_alert.Handler
 	var paymentLinkHandler *paymentlink.Handler
 	var refundHandler *refund.Handler
+	var scopeDenialRecorder ScopeDenialRecorder
 	for _, option := range options {
 		switch value := option.(type) {
 		case AuthRateLimitConfig:
@@ -92,6 +93,8 @@ func New(
 			paymentLinkHandler = value
 		case *refund.Handler:
 			refundHandler = value
+		case ScopeDenialRecorder:
+			scopeDenialRecorder = value
 		}
 	}
 	authLimiter := NewAuthRateLimiter(rateCfg)
@@ -177,9 +180,9 @@ func New(
 				})
 			}
 
-			// Usage Introspection
+			// Usage Introspection (a tenant usage report)
 			if usageHandler != nil {
-				r.Get("/usage", usageHandler.GetUsage)
+				r.With(RequireScope(domain.ScopeReportsRead)).Get("/usage", usageHandler.GetUsage)
 			}
 
 			// Idempotency Key Inspection
@@ -212,9 +215,12 @@ func New(
 			// Operational routes (Require not viewer for mutating calls)
 			r.Group(func(r chi.Router) {
 				r.Use(RequireNotViewer)
-				r.With(RequireScope(domain.ScopeWalletsRead)).Route("/wallets", walletHandler.Routes())
+				// Resource groups use RequireResourceScope so that every
+				// mutating method needs the :write scope, not just :read.
+				fiatScope := RequireResourceScope(domain.ScopeFiatRead, domain.ScopeFiatWrite)
+				r.With(RequireResourceScope(domain.ScopeWalletsRead, domain.ScopeWalletsWrite)).Route("/wallets", walletHandler.Routes())
 				if beneficiaryHandler != nil {
-					r.With(RequireScope(domain.ScopeBeneficiariesRead)).Route("/beneficiaries", beneficiaryHandler.Routes())
+					r.With(RequireResourceScope(domain.ScopeBeneficiariesRead, domain.ScopeBeneficiariesWrite)).Route("/beneficiaries", beneficiaryHandler.Routes())
 				}
 				if walletBalanceAlertHandler != nil {
 					r.With(RequireScope(domain.ScopeWalletBalanceAlertsRead)).Route("/wallet-balance-alerts", walletBalanceAlertHandler.Routes())
@@ -234,8 +240,8 @@ func New(
 						RequireScope(domain.ScopeTransfersWrite),
 					))
 				}
-				r.With(RequireScope(domain.ScopeTransfersRead)).Route("/transfers", transferHandler.Routes())
-				r.With(RequireScope(domain.ScopeTransfersWrite)).Route("/transfers/batch", batchHandler.Routes())
+				r.With(RequireResourceScope(domain.ScopeTransfersRead, domain.ScopeTransfersWrite)).Route("/transfers", transferHandler.Routes())
+				r.With(RequireResourceScope(domain.ScopeBatchesRead, domain.ScopeBatchesWrite)).Route("/transfers/batch", batchHandler.Routes())
 				r.With(RequireScope(domain.ScopeTransfersRead)).Route("/transactions", transferHandler.TransactionRoutes())
 				r.Route("/schedules", scheduleHandler.Routes(
 					RequireScope(domain.ScopeTransfersRead),

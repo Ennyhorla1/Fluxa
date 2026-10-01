@@ -442,6 +442,7 @@ func main() {
 		walletBalanceAlertHandler,
 		paymentLinkHandler,
 		refundHandler,
+		server.AuditScopeDenials(auditSvc),
 	)
 	server.RegisterDocsRoutes(srv.Router())
 

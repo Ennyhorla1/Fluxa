@@ -80,6 +80,21 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// A scoped API key may only mint keys narrower than itself; otherwise a
+	// keys:write key could issue a "*" (or unscoped, i.e. full-access) key.
+	if callerScopes, scoped := tenant.ScopesFromContext(r.Context()); scoped && len(callerScopes) > 0 {
+		if len(req.Scopes) == 0 {
+			api.Error(w, http.StatusForbidden, "INSUFFICIENT_SCOPE", "a scoped API key cannot create a full-access key; pass explicit scopes")
+			return
+		}
+		for _, s := range req.Scopes {
+			if !domain.HasScope(callerScopes, s) {
+				api.Error(w, http.StatusForbidden, "INSUFFICIENT_SCOPE", "API key cannot grant a scope it does not hold: "+s)
+				return
+			}
+		}
+	}
+
 	if req.ExpiresAt != nil && req.ExpiresAt.Before(time.Now().UTC()) {
 		api.BadRequest(w, "expires_at cannot be in the past")
 		return

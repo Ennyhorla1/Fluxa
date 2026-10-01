@@ -83,6 +83,27 @@ Errors are grouped by domain. Each entry includes the HTTP status code, the `cod
 
 ---
 
+### `403` — `INSUFFICIENT_SCOPE` | `API key does not have the required scope: <scope>`
+
+| Field | Value |
+|---|---|
+| **HTTP Status** | `403 Forbidden` |
+| **Code** | `INSUFFICIENT_SCOPE` |
+| **Description** | The API key is valid but was not granted the scope this operation needs. Reads (`GET`/`HEAD`) need `<resource>:read`; anything that changes state needs `<resource>:write`. The message names the missing scope. The code is stable, so match on it rather than the message. The denial is recorded in the audit log as `api_key.scope_denied`. |
+| **Resolution** | Create a key with the missing scope, or use one that has it. See [API key scopes](api-key-scopes.md). A scoped key creating another key gets the same error if it asks for a scope it doesn't hold itself. |
+
+**Example response:**
+```json
+{
+  "error": {
+    "code": "INSUFFICIENT_SCOPE",
+    "message": "API key does not have the required scope: transfers:write"
+  }
+}
+```
+
+---
+
 ## Wallet Errors
 
 ### `404` — `NOT_FOUND` | `wallet not found`

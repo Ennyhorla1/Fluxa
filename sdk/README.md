@@ -281,7 +281,7 @@ const { summary } = await client.fees.listCollected({
 const newKey = await client.keys.create({ title: "Production" });
 console.log(newKey.key); // Shown only once
 
-// List
+// List (includes each key's scopes, never the secret)
 const keys = await client.keys.list();
 
 // Revoke
@@ -373,6 +373,9 @@ try {
     console.log("Malformed cursor loop detected:", err.cursor);
   } else if (err instanceof AuthenticationError) {
     console.log("Bad API key");
+  } else if (err instanceof PermissionError) {
+    // 403 INSUFFICIENT_SCOPE: the key is valid but lacks a scope
+    console.log("API key is missing scope:", err.requiredScope);
   } else if (err instanceof FluxaError) {
     console.log(`API error ${err.statusCode}: [${err.code}] ${err.message}`);
   }

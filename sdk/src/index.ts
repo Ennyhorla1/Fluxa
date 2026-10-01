@@ -83,6 +83,8 @@ export type {
   ScheduleRunResponse,
   ListScheduleRunsResponse,
   // API Key
+  APIKeyScope,
+  APIKeyScopeResource,
   CreateKeyRequest,
   CreateKeyResponse,
   APIKeyResponse,

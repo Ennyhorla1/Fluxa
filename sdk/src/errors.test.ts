@@ -4,6 +4,7 @@ import {
   AuthenticationError,
   NotFoundError,
   ConflictError,
+  PermissionError,
   RateLimitError,
   ValidationError,
   FluxaError,
@@ -103,5 +104,24 @@ describe('classifyError', () => {
   it('returns UNKNOWN_ERROR when body is not an object', () => {
     const err = classifyError(500, null);
     expect(err.code).toBe('UNKNOWN_ERROR');
+  });
+
+  it('returns PermissionError naming the missing scope on 403 INSUFFICIENT_SCOPE', () => {
+    const err = classifyError(
+      403,
+      envelope('INSUFFICIENT_SCOPE', 'API key does not have the required scope: transfers:write'),
+    );
+    expect(err).toBeInstanceOf(PermissionError);
+    expect(err).toBeInstanceOf(FluxaError);
+    expect(err.code).toBe('INSUFFICIENT_SCOPE');
+    expect(err.statusCode).toBe(403);
+    expect((err as PermissionError).requiredScope).toBe('transfers:write');
+  });
+
+  it('keeps other 403s as a plain FluxaError', () => {
+    const err = classifyError(403, envelope('TRANSFER_BLOCKED_SANCTIONS', 'transfer blocked'));
+    expect(err).not.toBeInstanceOf(PermissionError);
+    expect(err.statusCode).toBe(403);
+    expect(err.code).toBe('TRANSFER_BLOCKED_SANCTIONS');
   });
 });

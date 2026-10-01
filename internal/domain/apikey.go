@@ -113,11 +113,24 @@ func (k *APIKey) NeedsRotationReminder(now time.Time) bool {
 }
 
 // HasScope checks if grantedScopes satisfy requiredScope.
-// An empty slice of grantedScopes represents unrestricted access (backwards compatibility).
+// An empty slice of grantedScopes represents unrestricted access: keys created
+// before scopes existed were migrated with no scopes and stay full-access.
 func HasScope(grantedScopes []string, requiredScope string) bool {
 	if len(grantedScopes) == 0 {
 		return true
 	}
+	if grantsScope(grantedScopes, requiredScope) {
+		return true
+	}
+	for _, legacy := range legacyScopeGrants[requiredScope] {
+		if grantsScope(grantedScopes, legacy) {
+			return true
+		}
+	}
+	return false
+}
+
+func grantsScope(grantedScopes []string, requiredScope string) bool {
 	for _, s := range grantedScopes {
 		if s == ScopeWildcard || s == "admin" || s == requiredScope {
 			return true

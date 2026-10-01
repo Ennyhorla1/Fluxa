@@ -217,17 +217,105 @@ func AuthMiddleware(repo *postgres.APIKeyRepo, jwtSecret []byte, validator Membe
 	}
 }
 
+// ScopeDenial describes an API-key request refused for missing a scope. It
+// deliberately carries no credential material: only the key's ID, what was
+// required, and what the key was granted.
+type ScopeDenial struct {
+	APIKeyID      string
+	RequiredScope string
+	GrantedScopes []string
+	Method        string
+	Path          string
+}
+
+// ScopeDenialRecorder persists scope denials, typically to the audit log.
+type ScopeDenialRecorder func(r *http.Request, denial ScopeDenial)
+
+type scopeDenialRecorderKey struct{}
+
+// WithScopeDenialRecorder makes rec available to every RequireScope check
+// further down the chain, including ones mounted inside handler packages.
+func WithScopeDenialRecorder(rec ScopeDenialRecorder) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if rec != nil {
+				r = r.WithContext(context.WithValue(r.Context(), scopeDenialRecorderKey{}, rec))
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+// AuditScopeDenials records each denial as an "api_key.scope_denied" audit
+// event against the key.
+func AuditScopeDenials(logger interface {
+	Log(r *http.Request, action, resourceType, resourceID string, metadata map[string]interface{})
+}) ScopeDenialRecorder {
+	return func(r *http.Request, d ScopeDenial) {
+		logger.Log(r, "api_key.scope_denied", "api_key", d.APIKeyID, map[string]interface{}{
+			"required_scope": d.RequiredScope,
+			"granted_scopes": d.GrantedScopes,
+			"method":         d.Method,
+			"path":           d.Path,
+		})
+	}
+}
+
+// InsufficientScopeCode is the stable error code returned with 403 when an
+// API key lacks the scope a route requires.
+const InsufficientScopeCode = "INSUFFICIENT_SCOPE"
+
+// RequireScope refuses API-key requests whose key does not grant
+// requiredScope. JWT (dashboard user) requests carry no scopes and are
+// governed by role checks instead.
 func RequireScope(requiredScope string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			scopes, hasScopes := tenant.ScopesFromContext(r.Context())
-			if hasScopes && !domain.HasScope(scopes, requiredScope) {
-				api.Error(w, http.StatusForbidden, "INSUFFICIENT_SCOPE", "API key does not have the required scope: "+requiredScope)
+			if !checkScope(w, r, requiredScope) {
 				return
 			}
 			next.ServeHTTP(w, r)
 		})
 	}
+}
+
+// RequireResourceScope applies read/write scopes by HTTP method: safe methods
+// (GET, HEAD, OPTIONS) need readScope, anything that can change state needs
+// writeScope. Use it on a whole route group so new mutating endpoints can't
+// slip through behind a read scope.
+func RequireResourceScope(readScope, writeScope string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			required := writeScope
+			switch r.Method {
+			case http.MethodGet, http.MethodHead, http.MethodOptions:
+				required = readScope
+			}
+			if !checkScope(w, r, required) {
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+func checkScope(w http.ResponseWriter, r *http.Request, requiredScope string) bool {
+	scopes, hasScopes := tenant.ScopesFromContext(r.Context())
+	if !hasScopes || domain.HasScope(scopes, requiredScope) {
+		return true
+	}
+
+	if rec, ok := r.Context().Value(scopeDenialRecorderKey{}).(ScopeDenialRecorder); ok {
+		rec(r, ScopeDenial{
+			APIKeyID:      tenant.APIKeyIDFromContext(r.Context()),
+			RequiredScope: requiredScope,
+			GrantedScopes: append([]string(nil), scopes...),
+			Method:        r.Method,
+			Path:          r.URL.Path,
+		})
+	}
+	api.Error(w, http.StatusForbidden, InsufficientScopeCode, "API key does not have the required scope: "+requiredScope)
+	return false
 }
 
 func RequireRole(allowedRoles ...string) func(http.Handler) http.Handler {
